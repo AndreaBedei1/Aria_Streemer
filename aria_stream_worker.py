@@ -109,6 +109,14 @@ class AriaStreamWorker:
         self._last_pv_emit = 0.0
         self._last_rgb_success = 0.0
         self._last_rgb_error_log = 0.0
+        self._last_rgb_decode_attempt = 0.0
+        self._last_slam_fallback_attempt = 0.0
+        self._rgb_decode_failures = 0
+        self._using_slam_fallback = False
+        self._unsafe_rgb_decode_enabled = (
+            config.force_rgb_decode and os.getenv("ARIA_ALLOW_UNSAFE_RGB_DECODE") == "1"
+        )
+        self._rgb_decoder_disabled = not self._unsafe_rgb_decode_enabled
         self._rgb_limiter = RateLimiter(config.rgb_fps)
         self._et_limiter = RateLimiter(config.et_fps)
         self._ht_limiter = RateLimiter(config.ht_fps)
@@ -218,6 +226,15 @@ class AriaStreamWorker:
                 enable_image_decoding=image_decode_needed,
                 enable_raw_stream=False,
             )
+            if self.config.force_rgb_decode and not self._unsafe_rgb_decode_enabled:
+                LOG.warning(
+                    "--force-rgb-decode ignored: RGB H265 decoder is unstable on this host. "
+                    "Using SLAM grayscale preview."
+                )
+                self.state.logs.set("RGB H265 disabled for stability; using SLAM grayscale preview")
+            if self._unsafe_rgb_decode_enabled:
+                self._install_rgb_decode_callback(self._stream_receiver)
+            self._install_slam_fallback_decode_callback(self._stream_receiver)
             self._configure_receiver(self._stream_receiver, toggles)
             self._device.start_streaming()
             self._stream_receiver.start_server()
@@ -280,6 +297,7 @@ class AriaStreamWorker:
 
         for setter in (
             "set_rgb_queue_size",
+            "set_slam_queue_size",
             "set_et_queue_size",
             "set_eye_gaze_queue_size",
             "set_hand_pose_queue_size",
@@ -289,7 +307,9 @@ class AriaStreamWorker:
                 getattr(stream_receiver, setter)(1)
 
         if toggles.rgb:
-            stream_receiver.register_rgb_callback(self._rgb_callback)
+            if self._unsafe_rgb_decode_enabled:
+                stream_receiver.register_rgb_callback(self._rgb_callback)
+            stream_receiver.register_slam_callback(self._slam_fallback_callback)
         if toggles.et_cameras:
             stream_receiver.register_et_callback(self._et_callback)
         if toggles.eye_tracking or toggles.blink_perclos:
@@ -301,12 +321,95 @@ class AriaStreamWorker:
         if toggles.temperature:
             stream_receiver.register_barometer_callback(self._barometer_callback)
 
+    def _install_rgb_decode_callback(self, stream_receiver: Any) -> None:
+        if not getattr(stream_receiver, "_enable_python_decoding", False):
+            return
+
+        def throttled_rgb_decode_callback(image_data: Any, image_record: Any) -> None:
+            if not self.state.get_toggles().rgb or self._rgb_decoder_disabled:
+                return
+            now = time.monotonic()
+            sustained_failures = (
+                self._rgb_decode_failures >= 4
+                and now - self._last_rgb_success > 2.0
+            )
+            min_period = 0.5 if sustained_failures else 1.0 / max(1, self.config.rgb_fps)
+            if now - self._last_rgb_decode_attempt < min_period:
+                return
+            self._last_rgb_decode_attempt = now
+
+            try:
+                decode_success = stream_receiver._decode_image_impl(
+                    image_data, image_record
+                )
+                if not decode_success:
+                    self._handle_rgb_decode_failure("decoder returned false")
+                    return
+                self._rgb_callback(image_data, image_record)
+            except Exception as exc:
+                self._handle_rgb_decode_failure(str(exc))
+
+        stream_receiver._decode_rgb_callback = throttled_rgb_decode_callback
+
+    def _install_slam_fallback_decode_callback(self, stream_receiver: Any) -> None:
+        if not getattr(stream_receiver, "_enable_python_decoding", False):
+            return
+
+        def throttled_slam_decode_callback(image_data: Any, image_record: Any) -> None:
+            now = time.monotonic()
+            if not self.state.get_toggles().rgb:
+                return
+            if not self._rgb_decoder_disabled and (
+                self._rgb_decode_failures < 4 or now - self._last_rgb_success < 2.0
+            ):
+                return
+            camera_id = int(getattr(image_record, "camera_id", 0))
+            if camera_id not in {1, 2}:
+                return
+            min_period = 1.0 / max(1, min(self.config.rgb_fps, 5))
+            if now - self._last_slam_fallback_attempt < min_period:
+                return
+            self._last_slam_fallback_attempt = now
+            try:
+                decode_success = stream_receiver._decode_image_impl(
+                    image_data, image_record
+                )
+                if decode_success:
+                    self._slam_fallback_callback(image_data, image_record)
+            except Exception:
+                return
+
+        stream_receiver._decode_slam_callback = throttled_slam_decode_callback
+
+    def _handle_rgb_decode_failure(self, message: str) -> None:
+        self._rgb_decode_failures += 1
+        now = time.monotonic()
+        if self._rgb_decode_failures >= 6 and not self._rgb_decoder_disabled:
+            self._rgb_decoder_disabled = True
+            text = "RGB decoder disabled; showing stable SLAM grayscale preview"
+            LOG.warning("%s: %s", text, message)
+            self.state.logs.set(text)
+            return
+        if now - self._last_rgb_error_log < 5.0:
+            return
+        self._last_rgb_error_log = now
+        if self._rgb_decode_failures >= 4:
+            text = "RGB decoder unstable; switching to SLAM grayscale preview"
+            LOG.warning("%s: %s", text, message)
+            self.state.logs.set(text)
+        else:
+            LOG.warning("RGB decoding failed: %s", message)
+            self.state.logs.set(f"RGB stream decode failed: {message}")
+
     def _rgb_callback(self, image_data: Any, image_record: Any, *args: Any) -> None:
-        if not self.state.get_toggles().rgb or not self._rgb_limiter.allow():
+        if not self.state.get_toggles().rgb:
             return
         try:
             arr = self._image_to_rgb_array(image_data)
             arr = resize_keep_aspect(arr, self.config.rgb_width, self.config.rgb_height)
+            if not self._rgb_frame_looks_usable(arr):
+                self._handle_rgb_decode_failure("decoded RGB frame has invalid yellow/color cast")
+                return
             height, width = arr.shape[:2]
             frame_number = getattr(image_record, "frame_number", None)
             self._fps["rgb"].tick(frame_number)
@@ -321,17 +424,37 @@ class AriaStreamWorker:
                 )
             )
             self._last_rgb_success = time.monotonic()
+            self._rgb_decode_failures = 0
+            self._using_slam_fallback = False
+            self._rgb_decoder_disabled = False
             if self.config.debug_streams:
                 LOG.debug("RGB frame %sx%s", width, height)
         except Exception as exc:
-            now = time.monotonic()
-            if now - self._last_rgb_error_log > 5.0:
-                self._last_rgb_error_log = now
-                if now - self._last_rgb_success > 2.0:
-                    LOG.warning("RGB decoding/display failed: %s", exc)
-                    self.state.logs.set(f"RGB stream decode failed: {exc}")
-                else:
-                    LOG.debug("Skipped one undecodable RGB frame: %s", exc)
+            self._handle_rgb_decode_failure(str(exc))
+
+    def _slam_fallback_callback(self, image_data: Any, image_record: Any, *args: Any) -> None:
+        try:
+            arr = self._image_to_grayscale_rgb_array(image_data)
+            arr = resize_keep_aspect(arr, self.config.rgb_width, self.config.rgb_height)
+            height, width = arr.shape[:2]
+            self._fps["rgb"].tick(getattr(image_record, "frame_number", None))
+            self.state.rgb_frame.set(
+                VideoFrame(
+                    image_rgb=arr.copy(),
+                    capture_timestamp_ns=int(getattr(image_record, "capture_timestamp_ns", 0)),
+                    camera_id=int(getattr(image_record, "camera_id", 0)),
+                    label="SLAM grayscale preview",
+                    width=width,
+                    height=height,
+                )
+            )
+            if not self._using_slam_fallback:
+                self._using_slam_fallback = True
+                self.state.logs.set(
+                    "Showing stable SLAM grayscale preview"
+                )
+        except Exception:
+            return
 
     def _et_callback(self, image_data: Any, image_record: Any, *args: Any) -> None:
         if not self.state.get_toggles().et_cameras or not self._et_limiter.allow():
@@ -588,14 +711,75 @@ class AriaStreamWorker:
         arr = np.asarray(image_data.to_numpy_array())
         if arr.ndim == 2:
             arr = np.repeat(arr[:, :, None], 3, axis=2)
-        if arr.ndim == 3 and arr.shape[2] > 3:
-            arr = arr[:, :, :3]
+        elif arr.ndim == 3:
+            if arr.shape[2] == 1:
+                arr = np.repeat(arr, 3, axis=2)
+            elif arr.shape[2] > 3:
+                arr = arr[:, :, :3]
         if arr.dtype != np.uint8:
             maxv = float(np.nanmax(arr)) if arr.size else 1.0
             if maxv <= 1.0:
                 arr = arr * 255.0
             arr = np.clip(arr, 0, 255).astype(np.uint8)
         return np.ascontiguousarray(arr)
+
+    @staticmethod
+    def _rgb_frame_looks_usable(arr: np.ndarray) -> bool:
+        if arr.ndim != 3 or arr.shape[2] != 3 or arr.size == 0:
+            return False
+        sample = arr
+        if sample.shape[0] > 240 or sample.shape[1] > 320:
+            y_idx = np.linspace(0, sample.shape[0] - 1, 180).astype(int)
+            x_idx = np.linspace(0, sample.shape[1] - 1, 240).astype(int)
+            sample = sample[y_idx][:, x_idx]
+
+        rgb = sample.astype(np.float32)
+        red = rgb[:, :, 0]
+        green = rgb[:, :, 1]
+        blue = rgb[:, :, 2]
+        means = rgb.reshape(-1, 3).mean(axis=0)
+        gray = rgb.mean(axis=2)
+        gray_std = float(gray.std())
+
+        yellow_pixels = (
+            (red > 145.0)
+            & (green > 125.0)
+            & (blue < 85.0)
+            & ((np.minimum(red, green) - blue) > 65.0)
+        )
+        yellow_fraction = float(np.mean(yellow_pixels))
+        blue_starved = means[2] < 0.45 * max(1.0, min(means[0], means[1]))
+        broad_yellow_cast = means[0] > 100.0 and means[1] > 90.0 and blue_starved
+
+        if yellow_fraction > 0.55:
+            return False
+        if broad_yellow_cast and gray_std < 42.0:
+            return False
+        return True
+
+    def _image_to_grayscale_rgb_array(self, image_data: Any) -> np.ndarray:
+        arr = np.asarray(image_data.to_numpy_array())
+        if arr.ndim == 3:
+            if arr.shape[2] == 1:
+                gray = arr[:, :, 0]
+            else:
+                gray = np.mean(arr[:, :, :3].astype(np.float32), axis=2)
+        else:
+            gray = arr
+
+        gray = np.asarray(gray, dtype=np.float32)
+        finite = np.isfinite(gray)
+        if not np.any(finite):
+            gray_u8 = np.zeros(gray.shape, dtype=np.uint8)
+        else:
+            lo = float(np.percentile(gray[finite], 1))
+            hi = float(np.percentile(gray[finite], 99))
+            if hi <= lo:
+                hi = lo + 1.0
+            gray_u8 = np.clip((gray - lo) * (255.0 / (hi - lo)), 0, 255).astype(
+                np.uint8
+            )
+        return np.ascontiguousarray(np.repeat(gray_u8[:, :, None], 3, axis=2))
 
     def _hand_side(self, hand: Any) -> HandSideSample:
         if hand is None:

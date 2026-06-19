@@ -54,6 +54,7 @@ class _VideoCanvas(QWidget):
         self.setMinimumSize(520, 360)
         self._pixmap: Optional[QPixmap] = None
         self._frame_size: Tuple[int, int] = (0, 0)
+        self._frame_label = ""
         self._gaze_point: Optional[Tuple[float, float]] = None
         self._message = "Waiting for data..."
 
@@ -68,9 +69,11 @@ class _VideoCanvas(QWidget):
         if frame is None:
             self._pixmap = None
             self._frame_size = (0, 0)
+            self._frame_label = ""
         else:
             self._pixmap = QPixmap.fromImage(_array_to_qimage(frame.image_rgb))
             self._frame_size = (frame.width, frame.height)
+            self._frame_label = frame.label
         self.update()
 
     def paintEvent(self, event):  # noqa: N802
@@ -81,6 +84,7 @@ class _VideoCanvas(QWidget):
         if self._pixmap is not None:
             painter.drawPixmap(target, self._pixmap)
             self._draw_gaze(painter, target)
+            self._draw_label(painter, target)
         else:
             painter.setPen(QColor("#d7dee8"))
             painter.drawText(self.rect(), Qt.AlignCenter, self._message)
@@ -108,6 +112,14 @@ class _VideoCanvas(QWidget):
         painter.setPen(QPen(QColor("#ffcf33"), 2))
         painter.drawLine(int(gx) - 18, int(gy), int(gx) + 18, int(gy))
         painter.drawLine(int(gx), int(gy) - 18, int(gx), int(gy) + 18)
+
+    def _draw_label(self, painter: QPainter, target: QRect) -> None:
+        if not self._frame_label:
+            return
+        label_rect = QRect(target.left() + 10, target.top() + 10, 150, 26)
+        painter.fillRect(label_rect, QColor(8, 16, 24, 190))
+        painter.setPen(QColor("#edf2f5"))
+        painter.drawText(label_rect.adjusted(8, 0, -8, 0), Qt.AlignVCenter, self._frame_label)
 
 
 def _array_to_qimage(arr: np.ndarray) -> QImage:

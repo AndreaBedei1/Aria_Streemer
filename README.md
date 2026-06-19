@@ -144,6 +144,17 @@ Scelte implementate:
 
 ## Limitazioni note
 
+- Su questa macchina Linux il decoder Python/XPRS del vero RGB H265 puo non
+  decodificare stabilmente e stampare messaggi tipo `PPS id out of range` o
+  `bad optional access`. Per la demo la dashboard usa di default una SLAM/CV
+  camera grayscale stabile come preview video, etichettata `SLAM grayscale
+  preview`, lasciando attivi gaze, hand tracking e PPG. Il vecchio percorso RGB
+  H265 e stato disabilitato per default perche puo anche causare crash nativi.
+  Solo per debug di laboratorio, non per demo:
+
+```bash
+ARIA_ALLOW_UNSAFE_RGB_DECODE=1 python app.py --usb --force-rgb-decode
+```
 - In questa build SDK il receiver espone callback per PPG e barometro, ma non
   espone callback tipizzate per ALS e temperatura dedicata. La app usa
   `device.status().skin_temp_celsius` e `BarometerData.temperature` per la

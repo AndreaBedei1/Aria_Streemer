@@ -22,6 +22,7 @@ class AppConfig:
     rgb_height: int = 540
     output_dir: str = "./recordings"
     debug_streams: bool = False
+    force_rgb_decode: bool = False
     streaming_profile: str = DEFAULT_STREAMING_PROFILE
     recording_profile: str = DEFAULT_RECORDING_PROFILE
     device_ip: str = ""
@@ -51,6 +52,11 @@ def parse_args() -> AppConfig:
     parser.add_argument("--rgb-height", type=int, default=540)
     parser.add_argument("--output-dir", type=str, default="./recordings")
     parser.add_argument("--debug-streams", action="store_true")
+    parser.add_argument(
+        "--force-rgb-decode",
+        action="store_true",
+        help="Try the real RGB H265 decoder instead of the stable SLAM preview",
+    )
 
     args = parser.parse_args()
     mode = "wifi" if args.wifi else "usb"
@@ -67,5 +73,6 @@ def parse_args() -> AppConfig:
         rgb_height=max(120, args.rgb_height),
         output_dir=args.output_dir,
         debug_streams=args.debug_streams,
+        force_rgb_decode=args.force_rgb_decode,
         device_ip=device_ip,
     )

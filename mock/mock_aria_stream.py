@@ -9,6 +9,7 @@ from config import AppConfig
 from mock import mock_data_generators as gen
 from processing.fps_counter import FpsCounter
 from processing.gaze_projection import looking_state, project_gaze_to_rgb
+from processing.image_conversion import normalize_image_for_display
 from processing.ppg_hr import PpgHeartRateEstimator
 from processing.pulse_variability import estimate_pulse_variability
 from stream_state import (
@@ -139,15 +140,22 @@ class MockAriaStreamWorker:
             if toggles.rgb and now >= next_rgb:
                 frame_no += 1
                 img = gen.rgb_frame(self.config.rgb_width, self.config.rgb_height, t)
+                display, metadata = normalize_image_for_display(
+                    img, source_name="mock RGB"
+                )
+                metadata["frame_number"] = frame_no
                 self._fps["rgb"].tick(frame_no)
                 self.state.rgb_frame.set(
                     VideoFrame(
-                        image_rgb=img,
+                        image_rgb=display,
                         capture_timestamp_ns=int(now * 1e9),
                         camera_id=64,
-                        label="RGB mock",
-                        width=img.shape[1],
-                        height=img.shape[0],
+                        label="mock RGB",
+                        width=display.shape[1],
+                        height=display.shape[0],
+                        metadata=metadata,
+                        valid=bool(metadata.get("valid", True)),
+                        warning=str(metadata.get("warning", "")),
                     )
                 )
                 next_rgb = now + 1.0 / self.config.rgb_fps
@@ -155,12 +163,38 @@ class MockAriaStreamWorker:
             if toggles.et_cameras and now >= next_et:
                 left = gen.et_frame(200, t, "left")
                 right = gen.et_frame(200, t, "right")
+                left_display, left_meta = normalize_image_for_display(
+                    left, source_name="ET left"
+                )
+                right_display, right_meta = normalize_image_for_display(
+                    right, source_name="ET right"
+                )
                 self._fps["et"].tick()
                 self.state.et_left_frame.set(
-                    VideoFrame(left, int(now * 1e9), 16, "ET left mock", 200, 200)
+                    VideoFrame(
+                        left_display,
+                        int(now * 1e9),
+                        16,
+                        "ET left",
+                        200,
+                        200,
+                        metadata=left_meta,
+                        valid=bool(left_meta.get("valid", True)),
+                        warning=str(left_meta.get("warning", "")),
+                    )
                 )
                 self.state.et_right_frame.set(
-                    VideoFrame(right, int(now * 1e9), 32, "ET right mock", 200, 200)
+                    VideoFrame(
+                        right_display,
+                        int(now * 1e9),
+                        32,
+                        "ET right",
+                        200,
+                        200,
+                        metadata=right_meta,
+                        valid=bool(right_meta.get("valid", True)),
+                        warning=str(right_meta.get("warning", "")),
+                    )
                 )
                 next_et = now + 1.0 / max(1, self.config.et_fps)
 

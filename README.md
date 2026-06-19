@@ -87,6 +87,7 @@ python app.py --rgb-fps 10 --ht-fps 10 --et-fps 5 --hr-update-hz 1
 python app.py --rgb-width 960 --rgb-height 540
 python app.py --output-dir ./recordings
 python app.py --debug-streams
+python app.py --debug-image-dump /tmp/aria_gui_debug
 ```
 
 ## Avvio in modalita mock
@@ -142,19 +143,41 @@ Scelte implementate:
 - UI refresh massimo 30 Hz;
 - nessun video locale salvato durante Recording Mode.
 
-## Limitazioni note
+## Debug video
 
-- Su questa macchina Linux il decoder Python/XPRS del vero RGB H265 puo non
-  decodificare stabilmente e stampare messaggi tipo `PPS id out of range` o
-  `bad optional access`. Per la demo la dashboard usa di default una SLAM/CV
-  camera grayscale stabile come preview video, etichettata `SLAM grayscale
-  preview`, lasciando attivi gaze, hand tracking e PPG. Il vecchio percorso RGB
-  H265 e stato disabilitato per default perche puo anche causare crash nativi.
-  Solo per debug di laboratorio, non per demo:
+Se serve ispezionare cosa arriva davvero dal decoder immagini, avvia la GUI con
+dump limitato dei primi frame:
 
 ```bash
-ARIA_ALLOW_UNSAFE_RGB_DECODE=1 python app.py --usb --force-rgb-decode
+python app.py --usb --debug-streams --debug-image-dump /tmp/aria_gui_debug
 ```
+
+Per isolare completamente la GUI dal device:
+
+```bash
+QT_QPA_PLATFORM=offscreen pytest -q
+QT_QPA_PLATFORM=offscreen python tools/smoke_test_gui.py
+```
+
+Per salvare i primi frame reali RGB/SLAM/ET con PNG e JSON:
+
+```bash
+python tools/debug_image_stream.py --usb --profile mp_streaming_demo --out /tmp/aria_frame_debug --max-frames 20
+```
+
+WiFi:
+
+```bash
+ARIA_DEVICE_IP=192.168.159.37 python tools/debug_image_stream.py --wifi --profile mp_streaming_demo --out /tmp/aria_frame_debug --max-frames 20
+```
+
+## Limitazioni note
+
+- Su Linux il decoder Python/XPRS del vero RGB H265 puo stampare messaggi tipo
+  `PPS id out of range` o `bad optional access`. La dashboard ora usa solo il
+  percorso pubblico `StreamReceiver`: se RGB e valido lo mostra come `RGB`; se
+  RGB manca o viene rigettato per qualita, usa la preview `SLAM grayscale
+  preview`. I frame gialli/quasi piatti non sovrascrivono l'ultimo frame valido.
 - In questa build SDK il receiver espone callback per PPG e barometro, ma non
   espone callback tipizzate per ALS e temperatura dedicata. La app usa
   `device.status().skin_temp_celsius` e `BarometerData.temperature` per la
@@ -169,6 +192,30 @@ ARIA_ALLOW_UNSAFE_RGB_DECODE=1 python app.py --usb --force-rgb-decode
   "not available".
 
 ## Troubleshooting
+
+Se il pannello RGB e un rettangolo giallo pieno:
+
+1. Esegui il test immagine mock:
+
+```bash
+QT_QPA_PLATFORM=offscreen pytest -q tests/test_mock_rgb_frame.py tests/test_qimage_conversion.py tests/test_video_widget_offscreen.py
+```
+
+2. Esegui lo smoke test GUI:
+
+```bash
+QT_QPA_PLATFORM=offscreen python tools/smoke_test_gui.py
+```
+
+3. Esegui il dump reale del flusso:
+
+```bash
+python tools/debug_image_stream.py --usb --profile mp_streaming_demo --out /tmp/aria_frame_debug --max-frames 20
+```
+
+4. Ispeziona `/tmp/aria_frame_debug/*.png` e `/tmp/aria_frame_debug/*.json`.
+5. Se RGB e invalido ma SLAM e valido, usa `SLAM grayscale preview` per la demo.
+6. Non abilitare hook privati o decoder monkey-patch per la demo pubblica.
 
 Dispositivo non trovato:
 
@@ -230,4 +277,5 @@ python app.py --rgb-width 960
 python app.py --rgb-height 540
 python app.py --output-dir ./recordings
 python app.py --debug-streams
+python app.py --debug-image-dump /tmp/aria_gui_debug
 ```

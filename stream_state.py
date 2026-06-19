@@ -22,6 +22,9 @@ class VideoFrame:
     label: str
     width: int
     height: int
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    valid: bool = True
+    warning: str = ""
 
 
 @dataclass

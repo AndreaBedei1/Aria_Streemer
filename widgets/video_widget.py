@@ -55,6 +55,8 @@ class _VideoCanvas(QWidget):
         self._pixmap: Optional[QPixmap] = None
         self._frame_size: Tuple[int, int] = (0, 0)
         self._frame_label = ""
+        self._frame_metadata: dict = {}
+        self._frame_warning = ""
         self._gaze_point: Optional[Tuple[float, float]] = None
         self._message = "Waiting for data..."
 
@@ -70,10 +72,24 @@ class _VideoCanvas(QWidget):
             self._pixmap = None
             self._frame_size = (0, 0)
             self._frame_label = ""
+            self._frame_metadata = {}
+            self._frame_warning = ""
         else:
-            self._pixmap = QPixmap.fromImage(_array_to_qimage(frame.image_rgb))
-            self._frame_size = (frame.width, frame.height)
+            self._frame_metadata = dict(frame.metadata or {})
+            self._frame_warning = frame.warning or self._frame_metadata.get("warning", "")
             self._frame_label = frame.label
+            if not frame.valid:
+                self._pixmap = None
+                self._frame_size = (0, 0)
+                self._message = self._frame_warning or "invalid frame rejected"
+            else:
+                try:
+                    self._pixmap = QPixmap.fromImage(_array_to_qimage(frame.image_rgb))
+                    self._frame_size = (frame.width, frame.height)
+                except Exception as exc:
+                    self._pixmap = None
+                    self._frame_size = (0, 0)
+                    self._message = f"invalid frame: {exc}"
         self.update()
 
     def paintEvent(self, event):  # noqa: N802
@@ -88,6 +104,7 @@ class _VideoCanvas(QWidget):
         else:
             painter.setPen(QColor("#d7dee8"))
             painter.drawText(self.rect(), Qt.AlignCenter, self._message)
+        painter.setBrush(Qt.NoBrush)
         painter.setPen(QPen(QColor("#253241"), 1))
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
@@ -103,28 +120,52 @@ class _VideoCanvas(QWidget):
     def _draw_gaze(self, painter: QPainter, target: QRect) -> None:
         if self._gaze_point is None or self._frame_size == (0, 0):
             return
-        fw, fh = self._frame_size
-        gx = target.x() + (self._gaze_point[0] / max(1, fw)) * target.width()
-        gy = target.y() + (self._gaze_point[1] / max(1, fh)) * target.height()
-        painter.setPen(QPen(QColor("#081018"), 3))
-        painter.setBrush(QColor("#ffcf33"))
-        painter.drawEllipse(int(gx) - 9, int(gy) - 9, 18, 18)
-        painter.setPen(QPen(QColor("#ffcf33"), 2))
-        painter.drawLine(int(gx) - 18, int(gy), int(gx) + 18, int(gy))
-        painter.drawLine(int(gx), int(gy) - 18, int(gx), int(gy) + 18)
+        painter.save()
+        try:
+            fw, fh = self._frame_size
+            gx = target.x() + (self._gaze_point[0] / max(1, fw)) * target.width()
+            gy = target.y() + (self._gaze_point[1] / max(1, fh)) * target.height()
+            painter.setPen(QPen(QColor("#081018"), 3))
+            painter.setBrush(QColor("#ffcf33"))
+            painter.drawEllipse(int(gx) - 9, int(gy) - 9, 18, 18)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#ffcf33"), 2))
+            painter.drawLine(int(gx) - 18, int(gy), int(gx) + 18, int(gy))
+            painter.drawLine(int(gx), int(gy) - 18, int(gx), int(gy) + 18)
+        finally:
+            painter.restore()
 
     def _draw_label(self, painter: QPainter, target: QRect) -> None:
         if not self._frame_label:
             return
-        label_rect = QRect(target.left() + 10, target.top() + 10, 150, 26)
+        lines = [self._frame_label]
+        if self._frame_size != (0, 0):
+            lines.append(f"{self._frame_size[0]} x {self._frame_size[1]}")
+        camera_id = self._frame_metadata.get("camera_id")
+        if camera_id is not None:
+            lines.append(f"camera {camera_id}")
+        path = self._frame_metadata.get("conversion_path")
+        if path:
+            lines.append(str(path))
+        if self._frame_warning:
+            lines.append(f"warning: {self._frame_warning}")
+
+        label_height = 20 * len(lines) + 8
+        label_rect = QRect(target.left() + 10, target.top() + 10, 260, label_height)
         painter.fillRect(label_rect, QColor(8, 16, 24, 190))
         painter.setPen(QColor("#edf2f5"))
-        painter.drawText(label_rect.adjusted(8, 0, -8, 0), Qt.AlignVCenter, self._frame_label)
+        painter.drawText(label_rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, "\n".join(lines))
 
 
 def _array_to_qimage(arr: np.ndarray) -> QImage:
+    if not isinstance(arr, np.ndarray):
+        raise TypeError("frame is not a numpy array")
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"expected HxWx3 RGB frame, got {arr.shape}")
+    if arr.dtype != np.uint8:
+        raise ValueError(f"expected uint8 RGB frame, got {arr.dtype}")
     rgb = np.ascontiguousarray(arr)
     height, width = rgb.shape[:2]
-    bytes_per_line = rgb.strides[0]
+    bytes_per_line = 3 * width
     image = QImage(rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
     return image.copy()

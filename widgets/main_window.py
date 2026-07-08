@@ -18,9 +18,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from experiment_manager import ExperimentManager
 from aria_stream_worker import AriaStreamWorker
 from config import AppConfig
+from experiment_manager import ExperimentManager
+from gesture_experiment_manager import GestureExperimentManager
 from mock.mock_aria_stream import MockAriaStreamWorker
 from stream_state import SharedStreamState, StreamToggles
 from widgets.hand_tracking_widget import HandTrackingWidget
@@ -40,13 +41,13 @@ class MainWindow(QMainWindow):
         self.state = SharedStreamState()
         self._force_all_streams()
         self.experiment_manager = ExperimentManager(config, self.state)
+        self.gesture_experiment_manager = GestureExperimentManager(config, self.state)
         if config.mock:
             self.worker = MockAriaStreamWorker(config, self.state)
         else:
             self.worker = AriaStreamWorker(config, self.state)
-        self._last_log = ""
 
-        self.setWindowTitle("Aria Streemer")
+        self.setWindowTitle("Aria Streamer")
         self.resize(1600, 950)
         self.setMinimumSize(1180, 720)
         self._build_ui()
@@ -117,22 +118,30 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(10)
 
-        self.experiment_widget = ExperimentWidget(self.config.output_dir)
+        self.experiment_widget = ExperimentWidget(
+            self.config.output_dir,
+            title="Object Experiment",
+            caption="Detected Object",
+            value_prefix="Object",
+        )
+        self.gesture_experiment_widget = ExperimentWidget(
+            self.config.output_dir,
+            title="Gesture Experiment",
+            caption="Detected Gesture",
+            value_prefix="Gesture",
+        )
         self.heart = HeartRateWidget()
         body.addWidget(left_column)
 
         right_layout.addWidget(self._panel(self.heart, role="heart"))
         right_layout.addWidget(self._panel(self.experiment_widget, role="experiment"))
+        right_layout.addWidget(self._panel(self.gesture_experiment_widget, role="experiment"))
         right_layout.addStretch(1)
         body.addWidget(right)
         body.setStretchFactor(0, 7)
         body.setStretchFactor(1, 3)
         body.setSizes([1080, 480])
         root.addWidget(body, 1)
-
-        self.log_label = QLabel("Preview Mode | Waiting for data...")
-        self.log_label.setObjectName("statusLine")
-        root.addWidget(self.log_label)
         self.setCentralWidget(central)
 
     def _build_header(self) -> QFrame:
@@ -143,21 +152,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(16)
 
-        brand = QVBoxLayout()
-        brand.setContentsMargins(0, 0, 0, 0)
-        brand.setSpacing(3)
-        title = QLabel("Aria Streemer")
+        title = QLabel("Aria Streamer")
         title.setObjectName("appTitle")
-        self.device_label = QLabel("Disconnected")
-        self.device_label.setObjectName("appSubtitle")
-        brand.addWidget(title)
-        brand.addWidget(self.device_label)
-        layout.addLayout(brand, 1)
-
-        self.mode_badge = QLabel("OFFLINE")
-        self.mode_badge.setObjectName("modeBadge")
-        self.mode_badge.setProperty("state", "idle")
-        layout.addWidget(self.mode_badge, 0, Qt.AlignVCenter)
+        layout.addWidget(title, 1)
 
         command_bar = QFrame()
         command_bar.setObjectName("commandBar")
@@ -167,14 +164,11 @@ class MainWindow(QMainWindow):
 
         self.connect_button = QPushButton("Connect Stream")
         self.stop_stream_button = QPushButton("Stop")
-        self.reset_button = QPushButton("Reset")
         self._configure_button(self.connect_button, "fa5s.play", "primary", "Connect and start streaming")
         self._configure_button(self.stop_stream_button, "fa5s.stop", "danger", "Stop streaming")
-        self._configure_button(self.reset_button, "fa5s.redo", "ghost", "Reset statistics")
         for button in (
             self.connect_button,
             self.stop_stream_button,
-            self.reset_button,
         ):
             commands.addWidget(button)
         layout.addWidget(command_bar)
@@ -188,11 +182,11 @@ class MainWindow(QMainWindow):
             frame.setMinimumHeight(112)
             frame.setMaximumHeight(128)
         elif role == "heart":
-            frame.setMinimumHeight(310)
-            frame.setMaximumHeight(370)
+            frame.setMinimumHeight(270)
+            frame.setMaximumHeight(320)
         elif role == "experiment":
-            frame.setMinimumHeight(250)
-            frame.setMaximumHeight(330)
+            frame.setMinimumHeight(185)
+            frame.setMaximumHeight(220)
         elif role == "handsLarge":
             frame.setMinimumHeight(250)
         elif role == "eyesCompact":
@@ -223,7 +217,6 @@ class MainWindow(QMainWindow):
         self.stop_stream_button.clicked.connect(
             lambda: self._run_action("Stopping streaming", self.worker.stop_streaming)
         )
-        self.reset_button.clicked.connect(self.worker.reset_statistics)
         self.experiment_widget.start_button.clicked.connect(
             lambda: self._run_action(
                 "Starting experiment",
@@ -235,10 +228,19 @@ class MainWindow(QMainWindow):
         self.experiment_widget.stop_button.clicked.connect(
             lambda: self._run_action("Stopping experiment", self.experiment_manager.stop_experiment)
         )
+        self.gesture_experiment_widget.start_button.clicked.connect(
+            lambda: self._run_action(
+                "Starting gesture experiment",
+                lambda: self.gesture_experiment_manager.start_experiment(
+                    self.gesture_experiment_widget.output_dir.text()
+                ),
+            )
+        )
+        self.gesture_experiment_widget.stop_button.clicked.connect(
+            lambda: self._run_action("Stopping gesture experiment", self.gesture_experiment_manager.stop_experiment)
+        )
 
     def _run_action(self, label: str, action: Callable[[], None]) -> None:
-        self.log_label.setText(label)
-
         def wrapped() -> None:
             try:
                 action()
@@ -253,50 +255,31 @@ class MainWindow(QMainWindow):
         eye = self.state.eye_tracking.get()
         gaze_point = eye.gaze_point_rgb if eye else None
         result = getattr(self.state, "experiment_result", {}) or {}
-        bbox = result.get("bbox") if self.experiment_manager.is_active else None
+        gesture_result = getattr(self.state, "gesture_experiment_result", {}) or {}
+        bbox = None
+        if self.experiment_manager.is_active:
+            bbox = result.get("bbox")
+        elif self.gesture_experiment_manager.is_active:
+            bbox = gesture_result.get("bbox")
         self.video.set_frame(rgb, gaze_point, "Camera preview not available", bbox)
 
         self.heart.update_sample(
             self.state.heart_rate.get(), self.state.pulse_variability.get()
         )
         self.hands.update_sample(self.state.hand_tracking.get())
-        conn = self.state.connection.get()
         self.experiment_widget.update_state(self.state, self.experiment_manager.is_active)
+        self.gesture_experiment_widget.update_state(
+            self.state,
+            self.gesture_experiment_manager.is_active,
+            "gesture_experiment_result",
+        )
 
         self.et_left.set_frame(self.state.et_left_frame.get())
         self.et_right.set_frame(self.state.et_right_frame.get())
 
-        log = self.state.logs.get()
-        self._update_header_state(conn)
-        if log and log != self._last_log:
-            self.log_label.setText(log)
-            self._last_log = log
-        elif conn is not None:
-            mode = "Experiment Mode" if self.experiment_manager.is_active else "Preview Mode"
-            self.log_label.setText(f"{mode} | {conn.status_message} | {conn.device_id}")
-
     def _connect_and_stream(self) -> None:
         self.worker.connect()
         self.worker.start_streaming()
-
-    def _update_header_state(self, conn) -> None:
-        if conn is None:
-            self._set_mode_badge("OFFLINE", "idle")
-            self.device_label.setText("Disconnected")
-            return
-
-        mode = "EXPERIMENT" if self.experiment_manager.is_active else "PREVIEW"
-        state = "active" if self.experiment_manager.is_active else "idle"
-        self._set_mode_badge(mode, state)
-        self.device_label.setText(f"{conn.status_message} | {conn.mode} | {conn.device_id}")
-
-    def _set_mode_badge(self, text: str, state: str) -> None:
-        self.mode_badge.setText(text)
-        if self.mode_badge.property("state") == state:
-            return
-        self.mode_badge.setProperty("state", state)
-        self.mode_badge.style().unpolish(self.mode_badge)
-        self.mode_badge.style().polish(self.mode_badge)
 
     def _apply_style(self) -> None:
         apply_theme(QApplication.instance() or self)
@@ -306,6 +289,7 @@ class MainWindow(QMainWindow):
             self.worker.stop_streaming()
             self.worker.disconnect()
             self.experiment_manager.close()
+            self.gesture_experiment_manager.close()
         except Exception:
             LOG.exception("Error while closing app")
         event.accept()

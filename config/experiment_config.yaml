@@ -30,3 +30,12 @@ experiment:
     - chair
     - hand
     - face
+
+gesture_experiment:
+  inference_interval: 0.35
+  weights_path: "./weights/hagrid/YOLOv10n_gestures.pt"
+  weights_url: "https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_gestures.pt"
+  confidence_threshold: 0.35
+  image_size: 640
+  device: "cpu"
+  auto_download: true

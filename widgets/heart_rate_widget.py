@@ -20,8 +20,6 @@ class HeartRateWidget(QWidget):
         self.bpm = QLabel("--")
         self.bpm.setObjectName("bpmValue")
         self.quality = QLabel("PPG not available")
-        self.trend = QLabel("Trend: --")
-        self.variability = QLabel("PV: Not enough data")
         self.plot = _BpmTrendPlot()
 
         layout = QVBoxLayout(self)
@@ -29,8 +27,6 @@ class HeartRateWidget(QWidget):
         layout.addWidget(self.title)
         layout.addWidget(self.bpm)
         layout.addWidget(self.quality)
-        layout.addWidget(self.trend)
-        layout.addWidget(self.variability)
         layout.addWidget(self.plot, 1)
 
     def update_sample(
@@ -42,25 +38,13 @@ class HeartRateWidget(QWidget):
             self.bpm.setText("-- BPM")
             message = "PPG not available" if sample is None else sample.message or "Waiting for stable BPM"
             self.quality.setText(message)
-            self.trend.setText("Trend: --")
             self.plot.set_status(message)
         else:
             self.bpm.setText(f"{sample.bpm:.0f} BPM")
             self.quality.setText(
                 f"Signal: {sample.quality} ({sample.quality_score:.2f})"
             )
-            self.trend.setText(f"Trend: {sample.trend}")
             self.plot.add_bpm(sample.timestamp_s or time.monotonic(), sample.bpm)
-
-        if variability is None or variability.rmssd_ms is None:
-            text = "PV: Not enough data"
-            if variability is not None:
-                text = f"PV: {variability.status}"
-            self.variability.setText(text)
-        else:
-            self.variability.setText(
-                f"PV: {variability.rmssd_ms:.0f} ms ({variability.status})"
-            )
 
 
 class _BpmTrendPlot(QWidget):

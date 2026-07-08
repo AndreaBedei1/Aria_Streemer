@@ -200,6 +200,7 @@ class SharedStreamState:
         self.recording = RecordingState()
         self.toggles = StreamToggles()
         self.experiment_result: Dict[str, Any] = {}
+        self.gesture_experiment_result: Dict[str, Any] = {}
         self._toggles_lock = threading.Lock()
         self._recording_lock = threading.Lock()
 

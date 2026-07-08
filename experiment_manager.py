@@ -12,6 +12,7 @@ except ImportError:
 from vision_backends import YoloWorldBackend, Detection
 from gaze_object_selector import select_object_by_gaze
 from experiment_logger import ExperimentLogger
+from speech_announcer import SpeechAnnouncer
 
 LOG = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class ExperimentManager:
         
         self.backend = None
         self.logger = None
+        self.speech = SpeechAnnouncer()
         
         # Temporal filtering
         self.history = deque(maxlen=3)
@@ -55,18 +57,18 @@ class ExperimentManager:
             
         LOG.info("Starting experiment...")
         
-        # Disable other streams
+        # Keep the dashboard fully populated while experiment inference runs.
         toggles = self.state.get_toggles()
-        toggles.heart_rate = False
-        toggles.ppg_quality = False
-        toggles.pulse_variability = False
-        toggles.hand_tracking = False
-        toggles.als = False
-        toggles.temperature = False
-        toggles.performance = False
         toggles.eye_tracking = True
         toggles.rgb = True
         toggles.gaze_overlay = True
+        toggles.et_cameras = True
+        toggles.pupils = True
+        toggles.blink_perclos = True
+        toggles.heart_rate = True
+        toggles.ppg_quality = True
+        toggles.pulse_variability = True
+        toggles.hand_tracking = True
         self.state.set_toggles(toggles)
         
         # Initialize Backend
@@ -81,7 +83,13 @@ class ExperimentManager:
         self._stop_event.clear()
         self.history.clear()
         self.last_stable_object = None
-        self.state.experiment_result = {"label": "Initializing...", "conf": 0.0, "fps": 0.0}
+        self.state.experiment_result = {
+            "label": "Initializing...",
+            "conf": 0.0,
+            "fps": 0.0,
+            "bbox": None,
+            "active": True,
+        }
         
         self._thread = threading.Thread(target=self._run_loop, name="experiment-worker", daemon=True)
         self._thread.start()
@@ -101,7 +109,17 @@ class ExperimentManager:
             self.logger.close()
             self.logger = None
             
-        self.state.experiment_result = {"label": "Stopped", "conf": 0.0, "fps": 0.0}
+        self.state.experiment_result = {
+            "label": "Stopped",
+            "conf": 0.0,
+            "fps": 0.0,
+            "bbox": None,
+            "active": False,
+        }
+
+    def close(self):
+        self.stop_experiment()
+        self.speech.close()
 
     def _temporal_filter(self, new_det: Optional[Detection]) -> Optional[Detection]:
         if not new_det:
@@ -156,25 +174,24 @@ class ExperimentManager:
                     cx, cy = w // 2, h // 2
                     gaze_point = (cx, cy)
                 
-                # If frame is small, just use the whole frame, otherwise crop
-                if h >= 1080 and w >= 1080:
-                    half = crop_size // 2
-                    x1 = max(0, cx - half)
-                    y1 = max(0, cy - half)
-                    x2 = min(w, cx + half)
-                    y2 = min(h, cy + half)
-                    
-                    # Adjust if hitting bounds
-                    if x1 == 0: x2 = min(w, crop_size)
-                    if y1 == 0: y2 = min(h, crop_size)
-                    if x2 == w: x1 = max(0, w - crop_size)
-                    if y2 == h: y1 = max(0, h - crop_size)
-                    
-                    crop = img[y1:y2, x1:x2].copy()
-                    offset_x, offset_y = x1, y1
-                else:
-                    crop = img
-                    offset_x, offset_y = 0, 0
+                focus_crop_size = min(crop_size, max(160, int(min(w, h) * 0.85)))
+                half = focus_crop_size // 2
+                x1 = max(0, cx - half)
+                y1 = max(0, cy - half)
+                x2 = min(w, cx + half)
+                y2 = min(h, cy + half)
+
+                if x1 == 0:
+                    x2 = min(w, focus_crop_size)
+                if y1 == 0:
+                    y2 = min(h, focus_crop_size)
+                if x2 == w:
+                    x1 = max(0, w - focus_crop_size)
+                if y2 == h:
+                    y1 = max(0, h - focus_crop_size)
+
+                crop = img[y1:y2, x1:x2].copy()
+                offset_x, offset_y = x1, y1
                 
                 # Inference
                 inf_start = time.time()
@@ -188,7 +205,8 @@ class ExperimentManager:
                     det.bbox = (bx1 + offset_x, by1 + offset_y, bx2 + offset_x, by2 + offset_y)
                 
                 # Select best object
-                best_det = select_object_by_gaze(detections, gaze_point, (w, h), self.max_radius_px)
+                focus_radius = min(self.max_radius_px, max(60.0, focus_crop_size * 0.35))
+                best_det = select_object_by_gaze(detections, gaze_point, (w, h), focus_radius)
                 
                 # Filter
                 stable_det = self._temporal_filter(best_det)
@@ -198,13 +216,18 @@ class ExperimentManager:
                     self.state.experiment_result = {
                         "label": stable_det.label, 
                         "conf": stable_det.confidence,
-                        "fps": self.last_inference_fps
+                        "fps": self.last_inference_fps,
+                        "bbox": stable_det.bbox,
+                        "active": True,
                     }
+                    self.speech.speak_label(stable_det.label)
                 else:
                     self.state.experiment_result = {
                         "label": "unknown", 
                         "conf": 0.0,
-                        "fps": self.last_inference_fps
+                        "fps": self.last_inference_fps,
+                        "bbox": None,
+                        "active": True,
                     }
                     
                 # Log

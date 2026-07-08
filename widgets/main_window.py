@@ -2,34 +2,30 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from typing import Callable
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
+    QApplication,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
-    QScrollArea,
+    QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from experiment_manager import ExperimentManager
-from aria_recording_manager import AriaRecordingManager
 from aria_stream_worker import AriaStreamWorker
 from config import AppConfig
 from mock.mock_aria_stream import MockAriaStreamWorker
 from stream_state import SharedStreamState, StreamToggles
-from widgets.eye_tracking_widget import EyeTrackingWidget
 from widgets.hand_tracking_widget import HandTrackingWidget
 from widgets.heart_rate_widget import HeartRateWidget
-from widgets.performance_widget import PerformanceWidget
-from widgets.physiology_widget import PhysiologyWidget
+from widgets.theme import ICON_SIZE, add_card_shadow, apply_theme, icon
 from widgets.experiment_widget import ExperimentWidget
 from widgets.video_widget import SmallVideoWidget, VideoWidget
 
@@ -42,61 +38,80 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.state = SharedStreamState()
+        self._force_all_streams()
         self.experiment_manager = ExperimentManager(config, self.state)
-        self.recording_manager = AriaRecordingManager(config, self.state)
         if config.mock:
-            self.worker = MockAriaStreamWorker(config, self.state, self.recording_manager)
+            self.worker = MockAriaStreamWorker(config, self.state)
         else:
-            self.worker = AriaStreamWorker(config, self.state, self.recording_manager)
-        self._last_lightweight_record = 0.0
+            self.worker = AriaStreamWorker(config, self.state)
         self._last_log = ""
 
-        self.setWindowTitle("Aria Gen 2 Realtime Demo")
-        self.resize(1440, 900)
+        self.setWindowTitle("Aria Streemer")
+        self.resize(1600, 950)
+        self.setMinimumSize(1180, 720)
         self._build_ui()
         self._apply_style()
         self._connect_signals()
-        self._apply_panel_visibility(self.state.get_toggles())
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(int(1000 / max(1, config.ui_refresh_hz)))
 
+    def _force_all_streams(self) -> None:
+        self.state.set_toggles(
+            StreamToggles(
+                rgb=True,
+                gaze_overlay=True,
+                eye_tracking=True,
+                et_cameras=True,
+                pupils=True,
+                blink_perclos=True,
+                heart_rate=True,
+                ppg_quality=True,
+                pulse_variability=True,
+                hand_tracking=True,
+                als=True,
+                temperature=True,
+                performance=True,
+            )
+        )
+
     def _build_ui(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(14, 14, 14, 14)
+        root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
+        root.addWidget(self._build_header())
 
-        top = QHBoxLayout()
-        self.connect_button = QPushButton("Connect glasses")
-        self.disconnect_button = QPushButton("Disconnect")
-        self.start_stream_button = QPushButton("Start streaming")
-        self.stop_stream_button = QPushButton("Stop streaming")
-        self.reset_button = QPushButton("Reset statistics")
-        for button in (
-            self.connect_button,
-            self.disconnect_button,
-            self.start_stream_button,
-            self.stop_stream_button,
-            self.reset_button,
-        ):
-            top.addWidget(button)
-        top.addStretch(1)
-        root.addLayout(top)
-
-        body = QHBoxLayout()
-        body.setSpacing(12)
+        body = QSplitter(Qt.Horizontal)
+        body.setChildrenCollapsible(False)
         left_column = QWidget()
         left_layout = QVBoxLayout(left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(12)
-        self.video = VideoWidget("Low-latency camera + gaze")
-        left_layout.addWidget(self._panel(self.video), 4)
+        left_layout.setSpacing(10)
+        self.video = VideoWidget("")
+        left_layout.addWidget(self._panel(self.video, role="hero"), 5)
 
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QFrame.NoFrame)
+        self.hands = HandTrackingWidget()
+        self.et_left = SmallVideoWidget("")
+        self.et_right = SmallVideoWidget("")
+        et_row = QWidget()
+        et_layout = QHBoxLayout(et_row)
+        et_layout.setContentsMargins(0, 0, 0, 0)
+        et_layout.setSpacing(6)
+        et_layout.addWidget(self.et_left)
+        et_layout.addWidget(self.et_right)
+
+        lower_row = QWidget()
+        lower_row.setMinimumHeight(260)
+        lower_row.setMaximumHeight(340)
+        lower_layout = QHBoxLayout(lower_row)
+        lower_layout.setContentsMargins(0, 0, 0, 0)
+        lower_layout.setSpacing(10)
+        lower_layout.addWidget(self._panel(self.hands, role="handsLarge"), 3)
+        lower_layout.addWidget(self._panel(et_row, role="eyesCompact"), 2)
+        left_layout.addWidget(lower_row, 2)
+
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -104,87 +119,107 @@ class MainWindow(QMainWindow):
 
         self.experiment_widget = ExperimentWidget(self.config.output_dir)
         self.heart = HeartRateWidget()
-        self.eye = EyeTrackingWidget()
-        self.hands = HandTrackingWidget()
-        self.physio = PhysiologyWidget()
-        self.performance = PerformanceWidget()
-        self.et_left = SmallVideoWidget("Left eye camera")
-        self.et_right = SmallVideoWidget("Right eye camera")
-        et_row = QWidget()
-        et_layout = QHBoxLayout(et_row)
-        et_layout.setContentsMargins(0, 0, 0, 0)
-        et_layout.setSpacing(10)
-        et_layout.addWidget(self.et_left)
-        et_layout.addWidget(self.et_right)
-        self.et_panel = self._panel(et_row)
-        left_layout.addWidget(self.et_panel, 1)
-        body.addWidget(left_column, 3)
+        body.addWidget(left_column)
 
-        self.toggles = self._build_toggles()
-        for widget in (
-            self._panel(self.heart),
-            self._panel(self.eye),
-            self._panel(self.hands),
-            self._panel(self.physio),
-            self._panel(self.performance),
-            self._panel(self.toggles),
-            self._panel(self.experiment_widget),
-        ):
-            right_layout.addWidget(widget)
+        right_layout.addWidget(self._panel(self.heart, role="heart"))
+        right_layout.addWidget(self._panel(self.experiment_widget, role="experiment"))
         right_layout.addStretch(1)
-        right_scroll.setWidget(right)
-        body.addWidget(right_scroll, 2)
-        root.addLayout(body, 1)
+        body.addWidget(right)
+        body.setStretchFactor(0, 7)
+        body.setStretchFactor(1, 3)
+        body.setSizes([1080, 480])
+        root.addWidget(body, 1)
 
         self.log_label = QLabel("Preview Mode | Waiting for data...")
         self.log_label.setObjectName("statusLine")
         root.addWidget(self.log_label)
         self.setCentralWidget(central)
 
-    def _build_toggles(self) -> QWidget:
-        widget = QWidget()
-        layout = QGridLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(6)
-        self.checkbox_map: dict[str, QCheckBox] = {}
-        labels = [
-            ("rgb", "Camera preview"),
-            ("gaze_overlay", "Gaze overlay"),
-            ("eye_tracking", "Eye tracking data"),
-            ("et_cameras", "ET cameras"),
-            ("pupils", "Pupils"),
-            ("blink_perclos", "Blink/PERCLOS"),
-            ("heart_rate", "Heart rate"),
-            ("ppg_quality", "PPG quality"),
-            ("pulse_variability", "Pulse variability"),
-            ("hand_tracking", "Hand tracking"),
-            ("als", "ALS"),
-            ("temperature", "Temperature"),
-            ("performance", "Performance panel"),
-        ]
-        defaults = vars(self.state.get_toggles())
-        for i, (key, label) in enumerate(labels):
-            box = QCheckBox(label)
-            box.setChecked(bool(defaults[key]))
-            self.checkbox_map[key] = box
-            layout.addWidget(box, i // 2, i % 2)
-        return widget
+    def _build_header(self) -> QFrame:
+        header = QFrame()
+        header.setObjectName("appHeader")
+        add_card_shadow(header)
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(16)
 
-    def _panel(self, child: QWidget) -> QFrame:
+        brand = QVBoxLayout()
+        brand.setContentsMargins(0, 0, 0, 0)
+        brand.setSpacing(3)
+        title = QLabel("Aria Streemer")
+        title.setObjectName("appTitle")
+        self.device_label = QLabel("Disconnected")
+        self.device_label.setObjectName("appSubtitle")
+        brand.addWidget(title)
+        brand.addWidget(self.device_label)
+        layout.addLayout(brand, 1)
+
+        self.mode_badge = QLabel("OFFLINE")
+        self.mode_badge.setObjectName("modeBadge")
+        self.mode_badge.setProperty("state", "idle")
+        layout.addWidget(self.mode_badge, 0, Qt.AlignVCenter)
+
+        command_bar = QFrame()
+        command_bar.setObjectName("commandBar")
+        commands = QHBoxLayout(command_bar)
+        commands.setContentsMargins(0, 0, 0, 0)
+        commands.setSpacing(8)
+
+        self.connect_button = QPushButton("Connect Stream")
+        self.stop_stream_button = QPushButton("Stop")
+        self.reset_button = QPushButton("Reset")
+        self._configure_button(self.connect_button, "fa5s.play", "primary", "Connect and start streaming")
+        self._configure_button(self.stop_stream_button, "fa5s.stop", "danger", "Stop streaming")
+        self._configure_button(self.reset_button, "fa5s.redo", "ghost", "Reset statistics")
+        for button in (
+            self.connect_button,
+            self.stop_stream_button,
+            self.reset_button,
+        ):
+            commands.addWidget(button)
+        layout.addWidget(command_bar)
+        return header
+
+    def _panel(self, child: QWidget, role: str = "default") -> QFrame:
         frame = QFrame()
         frame.setObjectName("panel")
+        frame.setProperty("role", role)
+        if role == "compact":
+            frame.setMinimumHeight(112)
+            frame.setMaximumHeight(128)
+        elif role == "heart":
+            frame.setMinimumHeight(310)
+            frame.setMaximumHeight(370)
+        elif role == "experiment":
+            frame.setMinimumHeight(250)
+            frame.setMaximumHeight(330)
+        elif role == "handsLarge":
+            frame.setMinimumHeight(250)
+        elif role == "eyesCompact":
+            frame.setMinimumHeight(250)
+        if role in {"compact", "heart", "experiment"}:
+            frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        add_card_shadow(frame)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
+        margin = 10 if role in {"compact", "handsLarge", "eyesCompact"} else 12
+        layout.setContentsMargins(margin, margin, margin, margin)
         layout.addWidget(child)
         return frame
 
+    def _section_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("sectionLabel")
+        return label
+
+    def _configure_button(self, button: QPushButton, icon_name: str, variant: str, tooltip: str) -> None:
+        button.setProperty("variant", variant)
+        button.setIcon(icon(icon_name))
+        button.setIconSize(ICON_SIZE)
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.PointingHandCursor)
+
     def _connect_signals(self) -> None:
-        self.connect_button.clicked.connect(lambda: self._run_action("Connecting", self.worker.connect))
-        self.disconnect_button.clicked.connect(lambda: self._run_action("Disconnecting", self.worker.disconnect))
-        self.start_stream_button.clicked.connect(
-            lambda: self._run_action("Starting streaming", self.worker.start_streaming)
-        )
+        self.connect_button.clicked.connect(lambda: self._run_action("Starting stream", self._connect_and_stream))
         self.stop_stream_button.clicked.connect(
             lambda: self._run_action("Stopping streaming", self.worker.stop_streaming)
         )
@@ -200,28 +235,6 @@ class MainWindow(QMainWindow):
         self.experiment_widget.stop_button.clicked.connect(
             lambda: self._run_action("Stopping experiment", self.experiment_manager.stop_experiment)
         )
-        for box in self.checkbox_map.values():
-            box.stateChanged.connect(self._toggles_changed)
-
-    def _toggles_changed(self) -> None:
-        toggles = StreamToggles(
-            **{key: box.isChecked() for key, box in self.checkbox_map.items()}
-        )
-        self.state.set_toggles(toggles)
-        self.worker.note_toggles_changed()
-        self._apply_panel_visibility(toggles)
-
-    def _apply_panel_visibility(self, toggles: StreamToggles) -> None:
-        self.et_panel.setVisible(toggles.et_cameras)
-        self.heart.parentWidget().setVisible(
-            toggles.heart_rate or toggles.ppg_quality or toggles.pulse_variability
-        )
-        self.eye.parentWidget().setVisible(
-            toggles.eye_tracking or toggles.pupils or toggles.blink_perclos
-        )
-        self.hands.parentWidget().setVisible(toggles.hand_tracking)
-        self.physio.parentWidget().setVisible(toggles.als or toggles.temperature)
-        self.performance.parentWidget().setVisible(toggles.performance)
 
     def _run_action(self, label: str, action: Callable[[], None]) -> None:
         self.log_label.setText(label)
@@ -236,157 +249,63 @@ class MainWindow(QMainWindow):
         threading.Thread(target=wrapped, name=label.lower().replace(" ", "-"), daemon=True).start()
 
     def _refresh(self) -> None:
-        toggles = self.state.get_toggles()
         rgb = self.state.rgb_frame.get()
         eye = self.state.eye_tracking.get()
-        gaze_point = eye.gaze_point_rgb if eye and toggles.gaze_overlay else None
-        if toggles.rgb:
-            self.video.set_frame(rgb, gaze_point, "Camera preview not available")
-        else:
-            self.video.set_frame(None, None, "Camera preview disabled")
+        gaze_point = eye.gaze_point_rgb if eye else None
+        result = getattr(self.state, "experiment_result", {}) or {}
+        bbox = result.get("bbox") if self.experiment_manager.is_active else None
+        self.video.set_frame(rgb, gaze_point, "Camera preview not available", bbox)
 
         self.heart.update_sample(
             self.state.heart_rate.get(), self.state.pulse_variability.get()
         )
-        self.eye.update_sample(eye, self.state.pupils.get())
         self.hands.update_sample(self.state.hand_tracking.get())
-        self.physio.update_sample(self.state.als.get(), self.state.temperature.get())
-        self.performance.update_sample(self.state.performance.get(), self.state.connection.get())
+        conn = self.state.connection.get()
         self.experiment_widget.update_state(self.state, self.experiment_manager.is_active)
 
-        if toggles.et_cameras:
-            self.et_left.set_frame(self.state.et_left_frame.get())
-            self.et_right.set_frame(self.state.et_right_frame.get())
+        self.et_left.set_frame(self.state.et_left_frame.get())
+        self.et_right.set_frame(self.state.et_right_frame.get())
 
         log = self.state.logs.get()
-        conn = self.state.connection.get()
-        rec = self.state.get_recording()
-        if rec.last_error:
-            self.log_label.setText(rec.last_error)
-        elif log and log != self._last_log:
+        self._update_header_state(conn)
+        if log and log != self._last_log:
             self.log_label.setText(log)
             self._last_log = log
         elif conn is not None:
             mode = "Experiment Mode" if self.experiment_manager.is_active else "Preview Mode"
             self.log_label.setText(f"{mode} | {conn.status_message} | {conn.device_id}")
 
-        self._record_lightweight_row()
+    def _connect_and_stream(self) -> None:
+        self.worker.connect()
+        self.worker.start_streaming()
 
-    def _record_lightweight_row(self) -> None:
-        rec = self.state.get_recording()
-        now = time.monotonic()
-        if not rec.active or now - self._last_lightweight_record < 1.0:
+    def _update_header_state(self, conn) -> None:
+        if conn is None:
+            self._set_mode_badge("OFFLINE", "idle")
+            self.device_label.setText("Disconnected")
             return
-        self._last_lightweight_record = now
-        hr = self.state.heart_rate.get()
-        eye = self.state.eye_tracking.get()
-        pupils = self.state.pupils.get()
-        hands = self.state.hand_tracking.get()
-        perf = self.state.performance.get()
-        pv = self.state.pulse_variability.get()
-        self.recording_manager.record_lightweight_sample(
-            {
-                "bpm": "" if hr is None or hr.bpm is None else f"{hr.bpm:.2f}",
-                "ppg_quality": "" if hr is None else hr.quality,
-                "ppg_quality_score": "" if hr is None else f"{hr.quality_score:.3f}",
-                "pulse_variability_rmssd_ms": ""
-                if pv is None or pv.rmssd_ms is None
-                else f"{pv.rmssd_ms:.2f}",
-                "gaze_yaw_rad": "" if eye is None or eye.yaw_rad is None else f"{eye.yaw_rad:.5f}",
-                "gaze_pitch_rad": "" if eye is None or eye.pitch_rad is None else f"{eye.pitch_rad:.5f}",
-                "eye_state": "" if eye is None else eye.eye_state,
-                "looking_state": "" if eye is None else eye.looking_state,
-                "blink_rate_per_min": ""
-                if eye is None or eye.blink_rate_per_min is None
-                else f"{eye.blink_rate_per_min:.2f}",
-                "perclos": "" if eye is None or eye.perclos is None else f"{eye.perclos:.3f}",
-                "pupil_left_mm": ""
-                if pupils is None or pupils.left_diameter_mm is None
-                else f"{pupils.left_diameter_mm:.3f}",
-                "pupil_right_mm": ""
-                if pupils is None or pupils.right_diameter_mm is None
-                else f"{pupils.right_diameter_mm:.3f}",
-                "left_hand_visible": "" if hands is None else hands.left.visible,
-                "right_hand_visible": "" if hands is None else hands.right.visible,
-                "landmark_count": "" if hands is None else hands.landmark_count,
-                "rgb_fps": "" if perf is None else f"{perf.fps.get('rgb', 0):.2f}",
-                "et_fps": "" if perf is None else f"{perf.fps.get('et', 0):.2f}",
-                "ht_fps": "" if perf is None else f"{perf.fps.get('ht', 0):.2f}",
-                "ui_state": "recording" if rec.active else "preview",
-            }
-        )
+
+        mode = "EXPERIMENT" if self.experiment_manager.is_active else "PREVIEW"
+        state = "active" if self.experiment_manager.is_active else "idle"
+        self._set_mode_badge(mode, state)
+        self.device_label.setText(f"{conn.status_message} | {conn.mode} | {conn.device_id}")
+
+    def _set_mode_badge(self, text: str, state: str) -> None:
+        self.mode_badge.setText(text)
+        if self.mode_badge.property("state") == state:
+            return
+        self.mode_badge.setProperty("state", state)
+        self.mode_badge.style().unpolish(self.mode_badge)
+        self.mode_badge.style().polish(self.mode_badge)
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QWidget {
-                background: #101214;
-                color: #edf2f5;
-                font-family: Inter, Segoe UI, Arial, sans-serif;
-                font-size: 14px;
-            }
-            QPushButton {
-                background: #252b2f;
-                color: #f4f7f8;
-                border: 1px solid #3a4248;
-                border-radius: 6px;
-                padding: 8px 12px;
-            }
-            QPushButton:hover { background: #30383d; }
-            QPushButton:disabled { color: #79848d; background: #191d20; }
-            QCheckBox { spacing: 8px; }
-            QLineEdit {
-                background: #171b1f;
-                border: 1px solid #323a40;
-                border-radius: 5px;
-                padding: 7px;
-            }
-            QFrame#panel {
-                background: #171b1f;
-                border: 1px solid #2c343a;
-                border-radius: 8px;
-            }
-            QLabel#panelTitle {
-                color: #ffffff;
-                font-size: 16px;
-                font-weight: 700;
-            }
-            QLabel#bpmValue {
-                color: #ffcf33;
-                font-size: 42px;
-                font-weight: 800;
-            }
-            QLabel#muted { color: #96a1ab; font-size: 12px; }
-            QLabel#statusLine {
-                color: #cdd6dd;
-                background: #171b1f;
-                border: 1px solid #2c343a;
-                border-radius: 6px;
-                padding: 8px;
-            }
-            QLabel#recOn {
-                color: #ffffff;
-                background: #b51f2a;
-                border-radius: 6px;
-                padding: 6px;
-                font-weight: 800;
-            }
-            QLabel#recOff {
-                color: #aeb8c2;
-                background: #252b2f;
-                border-radius: 6px;
-                padding: 6px;
-                font-weight: 700;
-            }
-            """
-        )
+        apply_theme(QApplication.instance() or self)
 
     def closeEvent(self, event):  # noqa: N802
         try:
-            if self.experiment_manager.is_active:
-                self.experiment_manager.stop_experiment()
             self.worker.stop_streaming()
             self.worker.disconnect()
+            self.experiment_manager.close()
         except Exception:
             LOG.exception("Error while closing app")
         event.accept()

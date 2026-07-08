@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from stream_state import SharedStreamState
+from widgets.theme import ICON_SIZE, icon
 
 
 class ExperimentWidget(QWidget):
@@ -19,29 +21,57 @@ class ExperimentWidget(QWidget):
         self.title.setObjectName("panelTitle")
         self.status = QLabel("OFF")
         self.status.setObjectName("recOff")
+        self.status.setMinimumWidth(48)
+        self.status.setAlignment(Qt.AlignCenter)
         
         self.detected_object = QLabel("Object: --")
         self.confidence = QLabel("Confidence: --")
         self.fps = QLabel("Inference FPS: --")
+        self.object_caption = QLabel("Detected Object")
+        self.object_caption.setObjectName("muted")
+        self.object_value = QLabel("--")
+        self.object_value.setObjectName("objectValue")
+        self.object_value.setAlignment(Qt.AlignCenter)
+        self.object_value.setWordWrap(True)
+        self.details = QLabel("Confidence: -- | FPS: --")
+        self.details.setObjectName("muted")
+        self.details.setAlignment(Qt.AlignCenter)
         
         self.output_dir = QLineEdit(output_dir)
-        self.start_button = QPushButton("Inizia esperimento")
-        self.stop_button = QPushButton("Ferma esperimento")
+        self.output_dir.setVisible(False)
+        self.start_button = QPushButton("Start")
+        self.stop_button = QPushButton("Stop")
+        self.start_button.setProperty("variant", "primary")
+        self.stop_button.setProperty("variant", "danger")
+        self.start_button.setIcon(icon("fa5s.play"))
+        self.stop_button.setIcon(icon("fa5s.stop"))
+        self.start_button.setIconSize(ICON_SIZE)
+        self.stop_button.setIconSize(ICON_SIZE)
+        self.start_button.setToolTip("Start experiment")
+        self.stop_button.setToolTip("Stop experiment")
         self.stop_button.setEnabled(False)
 
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        header.addWidget(self.title, 1)
+        header.addWidget(self.status, 0)
+
         buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.stop_button)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(6)
-        layout.addWidget(self.title)
-        layout.addWidget(self.status)
-        layout.addWidget(self.detected_object)
-        layout.addWidget(self.confidence)
-        layout.addWidget(self.fps)
-        layout.addWidget(self.output_dir)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        layout.addLayout(header)
         layout.addLayout(buttons)
+        layout.addStretch(1)
+        layout.addWidget(self.object_caption)
+        layout.addWidget(self.object_value)
+        layout.addWidget(self.details)
 
     def update_state(self, state: SharedStreamState, is_active: bool) -> None:
         if is_active:
@@ -60,10 +90,21 @@ class ExperimentWidget(QWidget):
 
         result = getattr(state, "experiment_result", None)
         if result:
-            self.detected_object.setText(f"Object: {result.get('label', '--')}")
-            self.confidence.setText(f"Confidence: {result.get('conf', 0.0):.2f}")
-            self.fps.setText(f"Inference FPS: {result.get('fps', 0.0):.2f}")
+            label = str(result.get("label", "--") or "--")
+            conf = float(result.get("conf", 0.0) or 0.0)
+            fps = float(result.get("fps", 0.0) or 0.0)
+            if label.lower() in {"unknown", "initializing...", "stopped"}:
+                display_label = "--" if not is_active else label
+            else:
+                display_label = label
+            self.detected_object.setText(f"Object: {display_label}")
+            self.confidence.setText(f"Confidence: {conf:.2f}")
+            self.fps.setText(f"Inference FPS: {fps:.2f}")
+            self.object_value.setText(display_label)
+            self.details.setText(f"Confidence: {conf:.2f} | FPS: {fps:.2f}")
         else:
             self.detected_object.setText("Object: --")
             self.confidence.setText("Confidence: --")
             self.fps.setText("Inference FPS: --")
+            self.object_value.setText("--")
+            self.details.setText("Confidence: -- | FPS: --")

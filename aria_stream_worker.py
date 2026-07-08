@@ -9,11 +9,10 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Iterable, Optional, Tuple
 
 import numpy as np
 
-from aria_recording_manager import AriaRecordingManager
 from config import AppConfig
 from processing.downsampling import RateLimiter, resize_keep_aspect
 from processing.fps_counter import FpsCounter
@@ -38,6 +37,9 @@ from stream_state import (
 
 
 LOG = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from aria_recording_manager import AriaRecordingManager
 
 
 class BlinkPerclosTracker:
@@ -88,7 +90,7 @@ class AriaStreamWorker:
         self,
         config: AppConfig,
         state: SharedStreamState,
-        recording_manager: AriaRecordingManager,
+        recording_manager: Optional[AriaRecordingManager] = None,
     ):
         self.config = config
         self.state = state
@@ -166,7 +168,8 @@ class AriaStreamWorker:
             status = self._safe_call(self._device.status, None)
             if status is not None:
                 self._device_ip = str(getattr(status, "wifi_ip_address", "") or target_ip)
-            self.recording_manager.set_device(self._device, self._sdk_gen2)
+            if self.recording_manager is not None:
+                self.recording_manager.set_device(self._device, self._sdk_gen2)
             self._connected = True
             self._log_device_context(status)
             self._update_connection("Connected", device_id=serial)
@@ -183,7 +186,8 @@ class AriaStreamWorker:
             self._device = None
             self._device_client = None
             self._connected = False
-            self.recording_manager.clear_device()
+            if self.recording_manager is not None:
+                self.recording_manager.clear_device()
             self._stop_monitor.set()
             self._update_connection("Disconnected")
 
@@ -368,10 +372,10 @@ class AriaStreamWorker:
             arr = self._force_grayscale_rgb(arr)
             arr = resize_keep_aspect(arr, self.config.rgb_width, self.config.rgb_height)
             metadata["conversion_path"] = f"{metadata.get('conversion_path', 'unknown')}+grayscale"
-            self._store_video_frame("Low-latency camera preview", arr, metadata)
+            self._store_video_frame("Camera Preview", arr, metadata)
             if not self._using_slam_fallback:
                 self._using_slam_fallback = True
-                self.state.logs.set("Low-latency camera preview active")
+                self.state.logs.set("Camera preview active")
         except Exception as exc:
             self.state.logs.set(f"SLAM frame rejected: {exc}")
 

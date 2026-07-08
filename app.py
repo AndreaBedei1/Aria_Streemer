@@ -22,7 +22,7 @@ def main() -> int:
     setup_logging(config.debug_streams)
     app = QApplication(sys.argv)
     window = MainWindow(config)
-    window.show()
+    window.showMaximized()
     return app.exec()
 
 

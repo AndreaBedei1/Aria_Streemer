@@ -8,18 +8,21 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from stream_state import VideoFrame
+from widgets.theme import Colors
 
 
 class VideoWidget(QWidget):
     def __init__(self, title: str = "Camera preview"):
         super().__init__()
-        self._title = QLabel(title)
-        self._title.setObjectName("panelTitle")
+        self._title = QLabel(title) if title else None
+        if self._title is not None:
+            self._title.setObjectName("panelTitle")
         self._canvas = _VideoCanvas()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        layout.addWidget(self._title)
+        if self._title is not None:
+            layout.addWidget(self._title)
         layout.addWidget(self._canvas, 1)
 
     def set_frame(
@@ -27,21 +30,25 @@ class VideoWidget(QWidget):
         frame: Optional[VideoFrame],
         gaze_point: Optional[Tuple[float, float]] = None,
         message: str = "Waiting for data...",
+        detection_bbox: Optional[Tuple[float, float, float, float]] = None,
     ) -> None:
-        self._canvas.set_frame(frame, gaze_point, message)
+        self._canvas.set_frame(frame, gaze_point, message, detection_bbox)
 
 
 class SmallVideoWidget(QWidget):
     def __init__(self, title: str):
         super().__init__()
-        self._title = QLabel(title)
-        self._title.setObjectName("muted")
+        self._title = QLabel(title) if title else None
+        if self._title is not None:
+            self._title.setObjectName("muted")
         self._canvas = _VideoCanvas()
-        self._canvas.setMinimumSize(240, 170)
+        self._canvas.setMinimumSize(130, 120)
+        self._canvas.setMaximumHeight(220)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        layout.addWidget(self._title)
+        if self._title is not None:
+            layout.addWidget(self._title)
         layout.addWidget(self._canvas)
 
     def set_frame(self, frame: Optional[VideoFrame], message: str = "ET cameras not available") -> None:
@@ -58,6 +65,7 @@ class _VideoCanvas(QWidget):
         self._frame_metadata: dict = {}
         self._frame_warning = ""
         self._gaze_point: Optional[Tuple[float, float]] = None
+        self._detection_bbox: Optional[Tuple[float, float, float, float]] = None
         self._message = "Waiting for data..."
 
     def set_frame(
@@ -65,8 +73,10 @@ class _VideoCanvas(QWidget):
         frame: Optional[VideoFrame],
         gaze_point: Optional[Tuple[float, float]],
         message: str,
+        detection_bbox: Optional[Tuple[float, float, float, float]] = None,
     ) -> None:
         self._gaze_point = gaze_point
+        self._detection_bbox = detection_bbox
         self._message = message
         if frame is None:
             self._pixmap = None
@@ -95,16 +105,17 @@ class _VideoCanvas(QWidget):
     def paintEvent(self, event):  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#111820"))
+        painter.fillRect(self.rect(), QColor(Colors.CANVAS_ALT))
         target = self._target_rect()
         if self._pixmap is not None:
             painter.drawPixmap(target, self._pixmap)
+            self._draw_detection_box(painter, target)
             self._draw_gaze(painter, target)
         else:
-            painter.setPen(QColor("#d7dee8"))
+            painter.setPen(QColor(Colors.TEXT))
             painter.drawText(self.rect(), Qt.AlignCenter, self._message)
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor("#253241"), 1))
+        painter.setPen(QPen(QColor(Colors.CANVAS_BORDER), 1))
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
     def _target_rect(self) -> QRect:
@@ -124,13 +135,39 @@ class _VideoCanvas(QWidget):
             fw, fh = self._frame_size
             gx = target.x() + (self._gaze_point[0] / max(1, fw)) * target.width()
             gy = target.y() + (self._gaze_point[1] / max(1, fh)) * target.height()
-            painter.setPen(QPen(QColor("#081018"), 3))
-            painter.setBrush(QColor("#ffcf33"))
+            painter.setPen(QPen(QColor(Colors.BACKGROUND), 3))
+            painter.setBrush(QColor(Colors.WARNING))
             painter.drawEllipse(int(gx) - 9, int(gy) - 9, 18, 18)
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor("#ffcf33"), 2))
+            painter.setPen(QPen(QColor(Colors.WARNING), 2))
             painter.drawLine(int(gx) - 18, int(gy), int(gx) + 18, int(gy))
             painter.drawLine(int(gx), int(gy) - 18, int(gx), int(gy) + 18)
+        finally:
+            painter.restore()
+
+    def _draw_detection_box(self, painter: QPainter, target: QRect) -> None:
+        if self._detection_bbox is None or self._frame_size == (0, 0):
+            return
+        fw, fh = self._frame_size
+        x1, y1, x2, y2 = self._detection_bbox
+        left = target.x() + (x1 / max(1, fw)) * target.width()
+        top = target.y() + (y1 / max(1, fh)) * target.height()
+        right = target.x() + (x2 / max(1, fw)) * target.width()
+        bottom = target.y() + (y2 / max(1, fh)) * target.height()
+        rect = QRect(
+            int(round(left)),
+            int(round(top)),
+            max(1, int(round(right - left))),
+            max(1, int(round(bottom - top))),
+        )
+        painter.save()
+        try:
+            glow = QColor(47, 191, 143, 80)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(glow, 8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+            painter.setPen(QPen(QColor(Colors.PRIMARY), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
         finally:
             painter.restore()
 
@@ -152,7 +189,7 @@ class _VideoCanvas(QWidget):
         label_height = 20 * len(lines) + 8
         label_rect = QRect(target.left() + 10, target.top() + 10, 260, label_height)
         painter.fillRect(label_rect, QColor(8, 16, 24, 190))
-        painter.setPen(QColor("#edf2f5"))
+        painter.setPen(QColor(Colors.TEXT))
         painter.drawText(label_rect.adjusted(8, 4, -8, -4), Qt.AlignLeft | Qt.AlignVCenter, "\n".join(lines))
 
 

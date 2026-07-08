@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from stream_state import EyeTrackingSample, PupilSample
+from widgets.theme import Colors
 
 
 class EyeTrackingWidget(QWidget):
@@ -15,7 +16,6 @@ class EyeTrackingWidget(QWidget):
         super().__init__()
         self.title = QLabel("Eye tracking")
         self.title.setObjectName("panelTitle")
-        self.state = QLabel("Waiting for data...")
         self.gaze = QLabel("Yaw/Pitch: --")
         self.blink = QLabel("Blink: --")
         self.pupil = QLabel("Pupils: not available")
@@ -23,7 +23,6 @@ class EyeTrackingWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
         layout.addWidget(self.title)
-        layout.addWidget(self.state)
         layout.addWidget(self.gaze)
         layout.addWidget(self.blink)
         layout.addWidget(self.pupil)
@@ -35,11 +34,9 @@ class EyeTrackingWidget(QWidget):
         pupil: Optional[PupilSample],
     ) -> None:
         if sample is None:
-            self.state.setText("Eye tracking not available")
             self.gaze.setText("Yaw/Pitch: --")
             self.blink.setText("Blink: --")
         else:
-            self.state.setText(f"{sample.eye_state} | {sample.looking_state}")
             yaw = "--" if sample.yaw_rad is None else f"{sample.yaw_rad:+.3f}"
             pitch = "--" if sample.pitch_rad is None else f"{sample.pitch_rad:+.3f}"
             self.gaze.setText(f"Yaw/Pitch: {yaw} / {pitch} rad")
@@ -73,11 +70,11 @@ class _PupilPlot(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect().adjusted(1, 1, -1, -1)
-        painter.fillRect(rect, QColor("#0f151d"))
-        painter.setPen(QPen(QColor("#273445"), 1))
+        painter.fillRect(rect, QColor(Colors.CANVAS))
+        painter.setPen(QPen(QColor(Colors.CANVAS_BORDER), 1))
         painter.drawRect(rect)
         if len(self._values) < 2:
-            painter.setPen(QColor("#92a0b3"))
+            painter.setPen(QColor(Colors.TEXT_MUTED))
             painter.drawText(rect, Qt.AlignCenter, "Pupil trend")
             return
         values = list(self._values)
@@ -91,5 +88,5 @@ class _PupilPlot(QWidget):
                 path.moveTo(x, y)
             else:
                 path.lineTo(x, y)
-        painter.setPen(QPen(QColor("#70d6ff"), 2))
+        painter.setPen(QPen(QColor(Colors.INFO), 2))
         painter.drawPath(path)

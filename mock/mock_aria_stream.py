@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from typing import TYPE_CHECKING, Optional
 
-from aria_recording_manager import AriaRecordingManager
 from config import AppConfig
 from mock import mock_data_generators as gen
 from processing.fps_counter import FpsCounter
@@ -30,13 +30,16 @@ from stream_state import (
 
 LOG = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from aria_recording_manager import AriaRecordingManager
+
 
 class MockAriaStreamWorker:
     def __init__(
         self,
         config: AppConfig,
         state: SharedStreamState,
-        recording_manager: AriaRecordingManager,
+        recording_manager: Optional[AriaRecordingManager] = None,
     ):
         self.config = config
         self.state = state
@@ -92,7 +95,7 @@ class MockAriaStreamWorker:
                 timestamp_s=time.monotonic(),
                 connected=False,
                 streaming=False,
-                recording=self.state.get_recording().active,
+                recording=False,
                 mode="mock",
                 sdk_version="mock",
                 status_message="Disconnected",
@@ -303,7 +306,7 @@ class MockAriaStreamWorker:
                         dropped_frames={k: v.dropped_frames for k, v in self._fps.items()},
                         overwrite_counts=self.state.buffer_overwrites(),
                         connection_state="Streaming",
-                        recording_state="ON" if self.state.get_recording().active else "OFF",
+                        recording_state="OFF",
                     )
                 )
                 self.state.connection.set(
@@ -311,7 +314,7 @@ class MockAriaStreamWorker:
                         timestamp_s=now,
                         connected=True,
                         streaming=True,
-                        recording=self.state.get_recording().active,
+                        recording=False,
                         mode="mock",
                         device_id="MOCK-ARIA-GEN2",
                         sdk_version="mock",

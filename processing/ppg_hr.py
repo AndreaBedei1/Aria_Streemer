@@ -187,10 +187,10 @@ class PpgHeartRateEstimator:
         recent = [b for _, b in list(self._history)[-5:]]
         delta = recent[-1] - recent[0]
         if delta > 3.0:
-            return "in aumento"
+            return "rising"
         if delta < -3.0:
-            return "in diminuzione"
-        return "stabile"
+            return "falling"
+        return "stable"
 
     def _plot_points(self, times: np.ndarray, values: np.ndarray) -> List[Tuple[float, float]]:
         if times.size == 0:

@@ -10,6 +10,8 @@ def project_hand_to_camera(
     image_width: int,
     image_height: int,
     calibration: object | None = None,
+    mirror_x: bool = False,
+    flip_y: bool = False,
 ) -> List[Tuple[float, float]]:
     """Project hand landmarks to a camera plane.
 
@@ -34,7 +36,11 @@ def project_hand_to_camera(
     for x, y, _ in pts:
         nx = (x - min_x) / span_x
         ny = (y - min_y) / span_y
-        out.append((nx * image_width, (1.0 - ny) * image_height))
+        if mirror_x:
+            nx = 1.0 - nx
+        if flip_y:
+            ny = 1.0 - ny
+        out.append((nx * image_width, ny * image_height))
     return out
 
 

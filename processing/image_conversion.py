@@ -52,16 +52,17 @@ def normalize_image_for_display(
     if arr.size == 0:
         metadata["error"] = "empty image array"
         return _placeholder_rgb(), metadata
-    try:
-        numeric_arr = arr.astype(np.float32, copy=False)
-    except Exception as exc:
-        metadata["error"] = f"image array is not numeric: {exc}"
-        return _placeholder_rgb(), metadata
-    if not np.all(np.isfinite(numeric_arr)):
-        metadata["error"] = "image contains NaN or Inf"
-        return _placeholder_rgb(), metadata
+    if arr.dtype != np.uint8:
+        try:
+            numeric_arr = arr.astype(np.float32, copy=False)
+        except Exception as exc:
+            metadata["error"] = f"image array is not numeric: {exc}"
+            return _placeholder_rgb(), metadata
+        if not np.all(np.isfinite(numeric_arr)):
+            metadata["error"] = "image contains NaN or Inf"
+            return _placeholder_rgb(), metadata
 
-    candidates = conversion_candidates(arr)
+    candidates = conversion_candidates(arr, source_name)
     if not candidates:
         metadata["error"] = f"unsupported image shape {arr.shape}"
         return _placeholder_rgb(), metadata
@@ -86,15 +87,17 @@ def normalize_image_for_display(
     return np.ascontiguousarray(chosen.image_rgb), chosen.metadata
 
 
-def conversion_candidates(arr: np.ndarray) -> List[Tuple[str, np.ndarray]]:
+def conversion_candidates(arr: np.ndarray, source_name: str = "") -> List[Tuple[str, np.ndarray]]:
     """Return reasonable display conversion candidates for debugging."""
 
     arr = np.asarray(arr)
     candidates: List[Tuple[str, np.ndarray]] = []
 
+    is_known_rgb = str(source_name).upper() == "RGB"
+
     if arr.ndim == 2:
         candidates.append(("gray_to_rgb", _gray_to_rgb(arr)))
-        if cv2 is not None and arr.shape[0] % 3 == 0:
+        if cv2 is not None and arr.shape[0] % 3 == 0 and not str(source_name).upper() == "SLAM":
             h = arr.shape[0] * 2 // 3
             if h > 0:
                 yuv = arr.reshape((arr.shape[0], arr.shape[1]))
@@ -113,20 +116,22 @@ def conversion_candidates(arr: np.ndarray) -> List[Tuple[str, np.ndarray]]:
         candidates.append(("gray_to_rgb", _gray_to_rgb(arr[:, :, 0])))
     elif channels == 3:
         candidates.append(("as_rgb", arr[:, :, :3]))
-        candidates.append(("bgr_to_rgb", arr[:, :, ::-1]))
-        if cv2 is not None:
-            u8 = _ensure_uint8_rgb(arr[:, :, :3])
-            for name, code in (
-                ("yuv_to_rgb", cv2.COLOR_YUV2RGB),
-                ("ycrcb_to_rgb", cv2.COLOR_YCrCb2RGB),
-            ):
-                try:
-                    candidates.append((name, cv2.cvtColor(u8, code)))
-                except Exception:
-                    pass
+        if not is_known_rgb:
+            candidates.append(("bgr_to_rgb", arr[:, :, ::-1]))
+            if cv2 is not None:
+                u8 = _ensure_uint8_rgb(arr[:, :, :3])
+                for name, code in (
+                    ("yuv_to_rgb", cv2.COLOR_YUV2RGB),
+                    ("ycrcb_to_rgb", cv2.COLOR_YCrCb2RGB),
+                ):
+                    try:
+                        candidates.append((name, cv2.cvtColor(u8, code)))
+                    except Exception:
+                        pass
     elif channels == 4:
         candidates.append(("rgba_to_rgb", arr[:, :, :3]))
-        candidates.append(("bgra_to_rgb", arr[:, :, [2, 1, 0]]))
+        if not is_known_rgb:
+            candidates.append(("bgra_to_rgb", arr[:, :, [2, 1, 0]]))
     return candidates
 
 
@@ -273,6 +278,8 @@ def _ensure_uint8_gray(gray: np.ndarray) -> np.ndarray:
 
 
 def _sample_for_quality(rgb: np.ndarray) -> np.ndarray:
+    if rgb.ndim < 2:
+        return rgb
     if rgb.shape[0] <= 240 and rgb.shape[1] <= 320:
         return rgb
     y_idx = np.linspace(0, rgb.shape[0] - 1, min(180, rgb.shape[0])).astype(int)
@@ -291,7 +298,8 @@ def _array_stats(arr: Any, prefix: str) -> Dict[str, Any]:
         f"{prefix}_dtype": str(arr.dtype),
     }
     try:
-        numeric = arr.astype(np.float32, copy=False)
+        sample = _sample_for_quality(arr) if arr.shape[0] > 240 else arr
+        numeric = sample.astype(np.float32, copy=False)
         finite = numeric[np.isfinite(numeric)]
         if finite.size:
             out.update(

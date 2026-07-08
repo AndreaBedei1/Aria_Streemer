@@ -11,7 +11,7 @@ from stream_state import VideoFrame
 
 
 class VideoWidget(QWidget):
-    def __init__(self, title: str = "RGB camera"):
+    def __init__(self, title: str = "Camera preview"):
         super().__init__()
         self._title = QLabel(title)
         self._title.setObjectName("panelTitle")
@@ -37,7 +37,7 @@ class SmallVideoWidget(QWidget):
         self._title = QLabel(title)
         self._title.setObjectName("muted")
         self._canvas = _VideoCanvas()
-        self._canvas.setMinimumSize(120, 100)
+        self._canvas.setMinimumSize(240, 170)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -100,7 +100,6 @@ class _VideoCanvas(QWidget):
         if self._pixmap is not None:
             painter.drawPixmap(target, self._pixmap)
             self._draw_gaze(painter, target)
-            self._draw_label(painter, target)
         else:
             painter.setPen(QColor("#d7dee8"))
             painter.drawText(self.rect(), Qt.AlignCenter, self._message)

@@ -1,0 +1,40 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Runtime logs and generated experiment data
+*.log
+recordings/
+
+# Downloaded model weights and generated ML artifacts
+weights/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# OS metadata
+.DS_Store
+Thumbs.db

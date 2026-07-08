@@ -113,6 +113,7 @@ class AriaStreamWorker:
         self._last_rgb_success = 0.0
         self._last_rgb_error_log = 0.0
         self._using_slam_fallback = False
+        self._preferred_slam_camera_id = 1
         self._debug_dump_counts = {"RGB": 0, "SLAM": 0, "ET": 0}
         self._rgb_limiter = RateLimiter(config.rgb_fps)
         self._et_limiter = RateLimiter(config.et_fps)
@@ -211,11 +212,12 @@ class AriaStreamWorker:
                     streaming_config.streaming_interface = (
                         self._sdk_gen2.StreamingInterface.WIFI_STA
                     )
-                    streaming_config.batch_period_ms = 200
                 else:
                     streaming_config.streaming_interface = (
                         self._sdk_gen2.StreamingInterface.USB_NCM
                     )
+                if hasattr(streaming_config, "batch_period_ms"):
+                    streaming_config.batch_period_ms = self.config.stream_batch_ms
             self._device.set_streaming_config(streaming_config)
 
             image_decode_needed = toggles.rgb or toggles.et_cameras
@@ -303,7 +305,8 @@ class AriaStreamWorker:
                 getattr(stream_receiver, setter)(1)
 
         if toggles.rgb:
-            stream_receiver.register_rgb_callback(self._rgb_callback)
+            if self.config.decode_rgb:
+                stream_receiver.register_rgb_callback(self._rgb_callback)
             stream_receiver.register_slam_callback(self._slam_callback)
         if toggles.et_cameras:
             stream_receiver.register_et_callback(self._et_callback)
@@ -315,6 +318,16 @@ class AriaStreamWorker:
             stream_receiver.register_ppg_callback(self._ppg_callback)
         if toggles.temperature:
             stream_receiver.register_barometer_callback(self._barometer_callback)
+        if hasattr(stream_receiver, "register_device_calib_callback"):
+            stream_receiver.register_device_calib_callback(self._device_calib_callback)
+
+    def _device_calib_callback(self, calib_json: str, *args: Any) -> None:
+        try:
+            from projectaria_tools.core import calibration
+            if isinstance(calib_json, str):
+                self._device_calibration = calibration.device_calibration_from_json_string(calib_json)
+        except Exception as exc:
+            self.state.logs.set(f"Calibration parse failed: {exc}")
 
     def _rgb_callback(self, image_data: Any, image_record: Any, *args: Any) -> None:
         if not self.state.get_toggles().rgb or not self._rgb_limiter.allow():
@@ -337,7 +350,12 @@ class AriaStreamWorker:
     def _slam_callback(self, image_data: Any, image_record: Any, *args: Any) -> None:
         if not self.state.get_toggles().rgb:
             return
-        if time.monotonic() - self._last_rgb_success < 1.5:
+        if self.config.decode_rgb and time.monotonic() - self._last_rgb_success < 1.5:
+            return
+        camera_id = int(getattr(image_record, "camera_id", 0) or 0)
+        if camera_id != self._preferred_slam_camera_id:
+            return
+        if not self._rgb_limiter.allow():
             return
         try:
             arr, metadata = normalize_image_for_display(
@@ -350,10 +368,10 @@ class AriaStreamWorker:
             arr = self._force_grayscale_rgb(arr)
             arr = resize_keep_aspect(arr, self.config.rgb_width, self.config.rgb_height)
             metadata["conversion_path"] = f"{metadata.get('conversion_path', 'unknown')}+grayscale"
-            self._store_video_frame("SLAM grayscale preview", arr, metadata)
+            self._store_video_frame("Low-latency camera preview", arr, metadata)
             if not self._using_slam_fallback:
                 self._using_slam_fallback = True
-                self.state.logs.set("SLAM frame accepted")
+                self.state.logs.set("Low-latency camera preview active")
         except Exception as exc:
             self.state.logs.set(f"SLAM frame rejected: {exc}")
 
@@ -475,7 +493,11 @@ class AriaStreamWorker:
             rgb = self.state.rgb_frame.get()
             gaze_pt = None
             if rgb is not None:
-                gaze_pt = project_gaze_to_rgb(yaw, pitch, rgb.width, rgb.height)
+                gaze_pt = project_gaze_to_rgb(
+                    yaw, pitch, rgb.width, rgb.height, rgb.label,
+                    calibration=getattr(self, "_device_calibration", None),
+                    eyegaze_data=eyegaze_data
+                )
             sample = EyeTrackingSample(
                 timestamp_s=ts,
                 yaw_rad=yaw,

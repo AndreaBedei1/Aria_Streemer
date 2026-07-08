@@ -9,8 +9,7 @@ senza usare `aria_streaming_viewer` e senza usare Rerun come viewer principale.
 La app lavora in due modi:
 
 - Preview Mode: default, mostra solo dati realtime e non salva dati.
-- Recording Mode: parte solo con `Start Recording`, usa la registrazione device-side
-  del Client SDK quando disponibile e salva localmente solo un CSV leggero di stime/metadati.
+- Experiment Mode: parte solo con `Inizia esperimento`, abilita un modello di visione artificiale YOLO-World in background per riconoscere l'oggetto guardato e salva un log CSV.
 
 ## Installazione
 
@@ -88,7 +87,12 @@ python app.py --rgb-width 960 --rgb-height 540
 python app.py --output-dir ./recordings
 python app.py --debug-streams
 python app.py --debug-image-dump /tmp/aria_gui_debug
+python app.py --decode-rgb
 ```
+
+Default demo: la preview principale usa una camera SLAM frontale in scala di
+grigi a bassa latenza con gaze overlay. `--decode-rgb` abilita il flusso RGB
+H265 a colori, ma puo aumentare molto il ritardo su Linux.
 
 ## Avvio in modalita mock
 
@@ -100,33 +104,47 @@ python app.py --mock
 La modalita mock genera dati finti ma realistici per RGB, ET cameras, gaze,
 pupille, blink/PERCLOS, PPG/BPM, qualita PPG, pulse variability e mani.
 
-## Registrazione
+## Esperimento Gaze Object Detection
 
-La dashboard non registra in Preview Mode.
+L'app include una modalità sperimentale per stimare l'oggetto guardato usando un modello di Object Detection (YOLO-World) in tempo reale.
 
-Con `Start Recording`:
+### Prerequisiti YOLO-World
 
-- crea un nome sessione automatico `aria_demo_YYYYMMDD_HHMMSS`;
-- chiama `device.set_recording_config(...)`;
-- chiama `device.start_recording()`;
-- crea un CSV leggero in output;
-- mostra `REC` e timer.
-
-Con `Stop Recording`:
-
-- chiama `device.stop_recording()`;
-- chiude il CSV locale.
-
-Il CSV locale non contiene video. Contiene solo timestamp, BPM stimato, qualita
-PPG, gaze, blink/PERCLOS, pupille se disponibili, stato mani, FPS e stato UI.
-
-Nota: la VRS device-side rimane sul dispositivo. Scaricarla durante una demo puo
-essere pesante; usare la CLI ufficiale dopo la sessione:
-
+Per usare YOLO-World, installare il pacchetto ultralytics (se non è già presente nel requirements.txt):
 ```bash
-aria_gen2 recording list
-aria_gen2 recording download -u <uuid> -o ./recordings
+pip install ultralytics torch
 ```
+*Se non è disponibile una GPU CUDA, l'inferenza avverrà su CPU, che potrebbe essere più lenta. Assicurarsi di mantenere bassa la frequenza di inferenza se si usa solo la CPU.*
+
+### Come avviare l'esperimento
+
+Dalla dashboard principale, dopo aver connesso gli occhiali e avviato lo streaming:
+1. Cliccare su **Inizia esperimento** (ex tasto di registrazione).
+2. L'app disabiliterà gli stream non essenziali (HR, SLAM, etc) e si concentrerà sullo stream RGB e sul Gaze Tracker.
+3. Il worker in background leggerà la configurazione da `config/experiment_config.yaml` e caricherà il modello `yolov8s-worldv2.pt`.
+4. Nel pannello dedicato appariranno lo stato dell'esperimento (ON/OFF), l'ultimo oggetto guardato con la relativa confidenza, e gli FPS di inferenza.
+5. Cliccare su **Ferma esperimento** per arrestarlo.
+
+### Configurazione
+
+I parametri dell'esperimento possono essere modificati nel file `config/experiment_config.yaml`:
+- **inference_interval**: Frequenza di inferenza (default 2.0 secondi)
+- **crop_size**: Dimensione della ROI centrata sul gaze (default 640px)
+- **max_radius_px**: Raggio di ricerca per associare le bounding box al gaze point (default 200px)
+- **classes**: Lista degli oggetti open-vocabulary da riconoscere (libro, smartphone, ecc.)
+
+### Salvataggio Log
+
+I log dell'esperimento vengono salvati come file CSV nella directory indicata nel campo testo (default `./recordings/`). Il file è nominato `experiment_log_<timestamp>.csv` e contiene:
+- `timestamp`: momento dell'evento
+- `gaze_x`, `gaze_y`: coordinate dello sguardo
+- `detection_label`, `confidence`: oggetto riconosciuto e confidenza
+- `bbox_*`: coordinate del bounding box
+- `inference_time_ms`: durata inferenza
+
+### Gestione Gaze Assente
+
+Se il sensore Eye Tracking fallisce nel restituire il punto di Gaze, il sistema usa automaticamente il **centro dell'immagine** come fallback sia per calcolare il crop (ROI) che per associare l'oggetto. Se nessun oggetto riconosciuto si trova vicino al punto di gaze/centro o ha scarsa confidenza, l'interfaccia mostrerà *unknown*.
 
 ## Performance
 
@@ -174,10 +192,10 @@ ARIA_DEVICE_IP=192.168.159.37 python tools/debug_image_stream.py --wifi --profil
 ## Limitazioni note
 
 - Su Linux il decoder Python/XPRS del vero RGB H265 puo stampare messaggi tipo
-  `PPS id out of range` o `bad optional access`. La dashboard ora usa solo il
-  percorso pubblico `StreamReceiver`: se RGB e valido lo mostra come `RGB`; se
-  RGB manca o viene rigettato per qualita, usa la preview `SLAM grayscale
-  preview`. I frame gialli/quasi piatti non sovrascrivono l'ultimo frame valido.
+  `PPS id out of range` o `bad optional access` e introdurre ritardo. Per la demo
+  la dashboard non decodifica RGB di default: mostra `Low-latency camera + gaze`
+  dalla camera SLAM frontale in scala di grigi. Usare `--decode-rgb` solo se
+  serve provare il colore e si accetta piu latenza.
 - In questa build SDK il receiver espone callback per PPG e barometro, ma non
   espone callback tipizzate per ALS e temperatura dedicata. La app usa
   `device.status().skin_temp_celsius` e `BarometerData.temperature` per la
@@ -214,7 +232,8 @@ python tools/debug_image_stream.py --usb --profile mp_streaming_demo --out /tmp/
 ```
 
 4. Ispeziona `/tmp/aria_frame_debug/*.png` e `/tmp/aria_frame_debug/*.json`.
-5. Se RGB e invalido ma SLAM e valido, usa `SLAM grayscale preview` per la demo.
+5. Se RGB e invalido ma SLAM e valido, usa la preview SLAM in scala di grigi
+   per la demo.
 6. Non abilitare hook privati o decoder monkey-patch per la demo pubblica.
 
 Dispositivo non trovato:

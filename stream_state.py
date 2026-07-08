@@ -168,7 +168,7 @@ class StreamToggles:
     rgb: bool = True
     gaze_overlay: bool = True
     eye_tracking: bool = True
-    et_cameras: bool = False
+    et_cameras: bool = True
     pupils: bool = True
     blink_perclos: bool = True
     heart_rate: bool = True
@@ -199,6 +199,7 @@ class SharedStreamState:
         self.logs = LatestValueBuffer[str]("logs")
         self.recording = RecordingState()
         self.toggles = StreamToggles()
+        self.experiment_result: Dict[str, Any] = {}
         self._toggles_lock = threading.Lock()
         self._recording_lock = threading.Lock()
 

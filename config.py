@@ -23,6 +23,8 @@ class AppConfig:
     output_dir: str = "./recordings"
     debug_streams: bool = False
     debug_image_dump: str = ""
+    decode_rgb: bool = True
+    stream_batch_ms: int = 20
     streaming_profile: str = DEFAULT_STREAMING_PROFILE
     recording_profile: str = DEFAULT_RECORDING_PROFILE
     device_ip: str = ""
@@ -53,6 +55,18 @@ def parse_args() -> AppConfig:
     parser.add_argument("--output-dir", type=str, default="./recordings")
     parser.add_argument("--debug-streams", action="store_true")
     parser.add_argument(
+        "--decode-rgb",
+        action="store_true",
+        default=True,
+        help="Decode the RGB H265 stream. Higher latency; off by default for demos.",
+    )
+    parser.add_argument(
+        "--stream-batch-ms",
+        type=int,
+        default=20,
+        help="HTTP streaming batch period in ms; lower values reduce preview latency.",
+    )
+    parser.add_argument(
         "--debug-image-dump",
         type=str,
         default="",
@@ -74,5 +88,7 @@ def parse_args() -> AppConfig:
         output_dir=args.output_dir,
         debug_streams=args.debug_streams,
         debug_image_dump=args.debug_image_dump,
+        decode_rgb=args.decode_rgb,
+        stream_batch_ms=max(5, args.stream_batch_ms),
         device_ip=device_ip,
     )

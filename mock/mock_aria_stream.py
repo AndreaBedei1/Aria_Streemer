@@ -202,7 +202,7 @@ class MockAriaStreamWorker:
                 yaw, pitch, valid = gen.gaze(t)
                 rgb = self.state.rgb_frame.get()
                 point = project_gaze_to_rgb(
-                    yaw, pitch, rgb.width if rgb else 960, rgb.height if rgb else 540
+                    yaw, pitch, rgb.width if rgb else 960, rgb.height if rgb else 540, rgb.label if rgb else ""
                 )
                 eye_state = "Eyes open" if valid else "Blinking"
                 self._fps["eye"].tick()

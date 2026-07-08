@@ -29,7 +29,7 @@ class HandTrackingWidget(QWidget):
         left = "visible" if sample.left.visible else "not visible"
         right = "visible" if sample.right.visible else "not visible"
         self.status.setText(
-            f"Left: {left} | Right: {right} | Landmarks: {sample.landmark_count}"
+            f"Mirror view | Left: {left} | Right: {right} | Landmarks: {sample.landmark_count}"
         )
         self.canvas.set_sample(sample)
 
@@ -58,18 +58,26 @@ class _HandsCanvas(QWidget):
         mid = rect.center().x()
         left_rect = rect.adjusted(8, 8, -(rect.width() // 2 + 4), -8)
         right_rect = rect.adjusted(rect.width() // 2 + 4, 8, -8, -8)
-        self._draw_side(painter, left_rect, self._sample.left, QColor("#70d6ff"))
-        self._draw_side(painter, right_rect, self._sample.right, QColor("#ffcf33"))
+        self._draw_side(painter, left_rect, self._sample.left, QColor("#70d6ff"), "Left hand")
+        self._draw_side(painter, right_rect, self._sample.right, QColor("#ffcf33"), "Right hand")
         painter.setPen(QPen(QColor("#273445"), 1))
         painter.drawLine(mid, rect.top() + 8, mid, rect.bottom() - 8)
 
-    def _draw_side(self, painter: QPainter, rect, side: HandSideSample, color: QColor) -> None:
+    def _draw_side(self, painter: QPainter, rect, side: HandSideSample, color: QColor, label: str) -> None:
+        painter.setPen(QColor("#92a0b3"))
+        painter.drawText(rect.adjusted(4, 2, -4, -2), Qt.AlignTop | Qt.AlignLeft, label)
         if not side.visible or not side.landmarks_device:
             painter.setPen(QColor("#657388"))
             painter.drawText(rect, Qt.AlignCenter, "not visible")
             return
-        points = project_hand_to_camera(side.landmarks_device, rect.width(), rect.height())
-        shifted = [(rect.left() + x, rect.top() + y) for x, y in points]
+        drawing_rect = rect.adjusted(4, 22, -4, -4)
+        points = project_hand_to_camera(
+            side.landmarks_device,
+            drawing_rect.width(),
+            drawing_rect.height(),
+            mirror_x=False,
+        )
+        shifted = [(drawing_rect.left() + x, drawing_rect.top() + y) for x, y in points]
         painter.setPen(QPen(color, 2))
         for a, b in HAND_CONNECTIONS:
             if a < len(shifted) and b < len(shifted):

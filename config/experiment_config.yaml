@@ -1,0 +1,32 @@
+experiment:
+  inference_interval: 2.0
+  model_name: "yolov8s-worldv2.pt"
+  crop_size: 640
+  max_radius_px: 200.0
+  classes:
+    - book
+    - smartphone
+    - pen
+    - notebook
+    - paper
+    - cup
+    - bottle
+    - keyboard
+    - mouse
+    - glasses
+    - keys
+    - wallet
+    - remote control
+    - charger
+    - cable
+    - headphones
+    - bag
+    - scissors
+    - ruler
+    - watch
+    - laptop
+    - tablet
+    - monitor
+    - chair
+    - hand
+    - face

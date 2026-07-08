@@ -71,14 +71,14 @@ class PpgHeartRateEstimator:
             )
 
         filtered = self._filter(values)
-        bpm, peak_times = self._estimate_from_peaks(times, filtered)
-        if bpm is None:
-            bpm = self._estimate_from_fft(filtered)
-            peak_times = []
+        peak_bpm, peak_times = self._estimate_from_peaks(times, filtered)
+        fft_bpm = self._estimate_from_fft(filtered)
+        bpm = self._select_bpm(peak_bpm, fft_bpm, quality)
 
         if bpm is not None:
             now = time.monotonic()
             self._history.append((now, bpm))
+            bpm = self._smoothed_bpm()
 
         return HeartRateEstimate(
             bpm=bpm,
@@ -140,6 +140,46 @@ class PpgHeartRateEstimator:
         freq = float(freqs[band][np.argmax(spectrum[band])])
         bpm = freq * 60.0
         return bpm if self.min_bpm <= bpm <= self.max_bpm else None
+
+    def _select_bpm(
+        self,
+        peak_bpm: Optional[float],
+        fft_bpm: Optional[float],
+        quality: PpgQualityEstimate,
+    ) -> Optional[float]:
+        if peak_bpm is None and fft_bpm is None:
+            return None
+        if peak_bpm is not None and fft_bpm is not None:
+            disagreement = abs(peak_bpm - fft_bpm)
+            if disagreement <= 12.0:
+                bpm = 0.75 * peak_bpm + 0.25 * fft_bpm
+            elif quality.label == "GOOD":
+                bpm = peak_bpm
+            else:
+                return self._recent_median_bpm()
+        else:
+            bpm = peak_bpm if peak_bpm is not None else fft_bpm
+
+        recent = self._recent_median_bpm()
+        if recent is not None and bpm is not None:
+            jump = abs(bpm - recent)
+            if jump > 24.0 and quality.label != "GOOD":
+                return recent
+            if jump > 14.0:
+                bpm = 0.65 * bpm + 0.35 * recent
+        return bpm
+
+    def _recent_median_bpm(self) -> Optional[float]:
+        if not self._history:
+            return None
+        recent = [b for _, b in list(self._history)[-5:]]
+        return float(np.median(recent))
+
+    def _smoothed_bpm(self) -> Optional[float]:
+        if not self._history:
+            return None
+        recent = [b for _, b in list(self._history)[-5:]]
+        return float(np.median(recent))
 
     def _trend(self) -> str:
         if len(self._history) < 5:

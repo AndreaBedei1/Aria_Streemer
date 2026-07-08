@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from experiment_manager import ExperimentManager
 from aria_recording_manager import AriaRecordingManager
 from aria_stream_worker import AriaStreamWorker
 from config import AppConfig
@@ -29,7 +30,7 @@ from widgets.hand_tracking_widget import HandTrackingWidget
 from widgets.heart_rate_widget import HeartRateWidget
 from widgets.performance_widget import PerformanceWidget
 from widgets.physiology_widget import PhysiologyWidget
-from widgets.recording_widget import RecordingWidget
+from widgets.experiment_widget import ExperimentWidget
 from widgets.video_widget import SmallVideoWidget, VideoWidget
 
 
@@ -41,6 +42,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.state = SharedStreamState()
+        self.experiment_manager = ExperimentManager(config, self.state)
         self.recording_manager = AriaRecordingManager(config, self.state)
         if config.mock:
             self.worker = MockAriaStreamWorker(config, self.state, self.recording_manager)
@@ -85,8 +87,12 @@ class MainWindow(QMainWindow):
 
         body = QHBoxLayout()
         body.setSpacing(12)
-        self.video = VideoWidget("RGB camera live")
-        body.addWidget(self._panel(self.video), 3)
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
+        self.video = VideoWidget("Low-latency camera + gaze")
+        left_layout.addWidget(self._panel(self.video), 4)
 
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
@@ -96,31 +102,33 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(10)
 
-        self.recording_widget = RecordingWidget(self.config.output_dir)
+        self.experiment_widget = ExperimentWidget(self.config.output_dir)
         self.heart = HeartRateWidget()
         self.eye = EyeTrackingWidget()
         self.hands = HandTrackingWidget()
         self.physio = PhysiologyWidget()
         self.performance = PerformanceWidget()
-        self.et_left = SmallVideoWidget("ET left")
-        self.et_right = SmallVideoWidget("ET right")
+        self.et_left = SmallVideoWidget("Left eye camera")
+        self.et_right = SmallVideoWidget("Right eye camera")
         et_row = QWidget()
         et_layout = QHBoxLayout(et_row)
         et_layout.setContentsMargins(0, 0, 0, 0)
+        et_layout.setSpacing(10)
         et_layout.addWidget(self.et_left)
         et_layout.addWidget(self.et_right)
         self.et_panel = self._panel(et_row)
+        left_layout.addWidget(self.et_panel, 1)
+        body.addWidget(left_column, 3)
 
         self.toggles = self._build_toggles()
         for widget in (
-            self._panel(self.recording_widget),
-            self._panel(self.toggles),
             self._panel(self.heart),
             self._panel(self.eye),
-            self.et_panel,
             self._panel(self.hands),
             self._panel(self.physio),
             self._panel(self.performance),
+            self._panel(self.toggles),
+            self._panel(self.experiment_widget),
         ):
             right_layout.addWidget(widget)
         right_layout.addStretch(1)
@@ -141,7 +149,7 @@ class MainWindow(QMainWindow):
         layout.setVerticalSpacing(6)
         self.checkbox_map: dict[str, QCheckBox] = {}
         labels = [
-            ("rgb", "RGB camera"),
+            ("rgb", "Camera preview"),
             ("gaze_overlay", "Gaze overlay"),
             ("eye_tracking", "Eye tracking data"),
             ("et_cameras", "ET cameras"),
@@ -181,16 +189,16 @@ class MainWindow(QMainWindow):
             lambda: self._run_action("Stopping streaming", self.worker.stop_streaming)
         )
         self.reset_button.clicked.connect(self.worker.reset_statistics)
-        self.recording_widget.start_button.clicked.connect(
+        self.experiment_widget.start_button.clicked.connect(
             lambda: self._run_action(
-                "Starting recording",
-                lambda: self.recording_manager.start_recording(
-                    self.recording_widget.output_dir.text()
+                "Starting experiment",
+                lambda: self.experiment_manager.start_experiment(
+                    self.experiment_widget.output_dir.text()
                 ),
             )
         )
-        self.recording_widget.stop_button.clicked.connect(
-            lambda: self._run_action("Stopping recording", self.recording_manager.stop_recording)
+        self.experiment_widget.stop_button.clicked.connect(
+            lambda: self._run_action("Stopping experiment", self.experiment_manager.stop_experiment)
         )
         for box in self.checkbox_map.values():
             box.stateChanged.connect(self._toggles_changed)
@@ -233,9 +241,9 @@ class MainWindow(QMainWindow):
         eye = self.state.eye_tracking.get()
         gaze_point = eye.gaze_point_rgb if eye and toggles.gaze_overlay else None
         if toggles.rgb:
-            self.video.set_frame(rgb, gaze_point, "RGB stream not available")
+            self.video.set_frame(rgb, gaze_point, "Camera preview not available")
         else:
-            self.video.set_frame(None, None, "RGB disabled")
+            self.video.set_frame(None, None, "Camera preview disabled")
 
         self.heart.update_sample(
             self.state.heart_rate.get(), self.state.pulse_variability.get()
@@ -244,7 +252,7 @@ class MainWindow(QMainWindow):
         self.hands.update_sample(self.state.hand_tracking.get())
         self.physio.update_sample(self.state.als.get(), self.state.temperature.get())
         self.performance.update_sample(self.state.performance.get(), self.state.connection.get())
-        self.recording_widget.update_state(self.state.get_recording())
+        self.experiment_widget.update_state(self.state, self.experiment_manager.is_active)
 
         if toggles.et_cameras:
             self.et_left.set_frame(self.state.et_left_frame.get())
@@ -259,7 +267,7 @@ class MainWindow(QMainWindow):
             self.log_label.setText(log)
             self._last_log = log
         elif conn is not None:
-            mode = "Recording Mode" if rec.active else "Preview Mode"
+            mode = "Experiment Mode" if self.experiment_manager.is_active else "Preview Mode"
             self.log_label.setText(f"{mode} | {conn.status_message} | {conn.device_id}")
 
         self._record_lightweight_row()
@@ -375,8 +383,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802
         try:
-            if self.state.get_recording().active and self.config.mock:
-                self.recording_manager.stop_recording()
+            if self.experiment_manager.is_active:
+                self.experiment_manager.stop_experiment()
             self.worker.stop_streaming()
             self.worker.disconnect()
         except Exception:

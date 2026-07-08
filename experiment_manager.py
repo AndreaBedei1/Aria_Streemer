@@ -95,6 +95,7 @@ class ExperimentManager:
         self._thread.start()
         
     def stop_experiment(self):
+        self.speech.cancel()
         if not self.is_active:
             return
             
@@ -210,6 +211,8 @@ class ExperimentManager:
                 
                 # Filter
                 stable_det = self._temporal_filter(best_det)
+                if self._stop_event.is_set():
+                    break
                 
                 # Update state
                 if stable_det:

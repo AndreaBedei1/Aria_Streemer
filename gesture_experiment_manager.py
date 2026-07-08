@@ -27,11 +27,17 @@ class GestureExperimentManager:
         self.history = deque(maxlen=3)
         self.last_stable_gesture: Optional[GesturePrediction] = None
         self.last_inference_fps = 0.0
-        self.inference_interval = 0.35
+        self.inference_interval = 1.0
+        self.min_speech_confidence = 0.80
+        self.speech_cooldown_s = 4.0
+        self._last_spoken_at = 0.0
+        self._last_spoken_label = ""
         self.speech = SpeechAnnouncer()
 
         cfg = self._load_config()
         self.inference_interval = float(cfg.get("inference_interval", self.inference_interval))
+        self.min_speech_confidence = float(cfg.get("min_speech_confidence", self.min_speech_confidence))
+        self.speech_cooldown_s = float(cfg.get("speech_cooldown_s", self.speech_cooldown_s))
         self.fallback_backend = LandmarkGestureFallbackBackend()
         self.hagrid_backend = HaGridGestureBackend(
             weights_path=str(cfg.get("weights_path", "./weights/hagrid/YOLOv10n_gestures.pt")),
@@ -73,6 +79,7 @@ class GestureExperimentManager:
         self._thread.start()
 
     def stop_experiment(self) -> None:
+        self.speech.cancel()
         if not self.is_active:
             return
         self.is_active = False
@@ -96,6 +103,8 @@ class GestureExperimentManager:
         while not self._stop_event.is_set():
             started = time.monotonic()
             prediction = self._predict_once()
+            if self._stop_event.is_set():
+                break
             stable = self._temporal_filter(prediction)
             if stable is not None:
                 self.state.gesture_experiment_result = {
@@ -106,7 +115,8 @@ class GestureExperimentManager:
                     "source": stable.model_name,
                     "active": True,
                 }
-                self.speech.speak_label(stable.label)
+                if self._should_speak(stable):
+                    self.speech.speak_label(stable.label)
             else:
                 self.state.gesture_experiment_result = {
                     "label": "Waiting for hand data",
@@ -151,6 +161,16 @@ class GestureExperimentManager:
         if count >= 2 and prediction and prediction.label == label:
             self.last_stable_gesture = prediction
         return self.last_stable_gesture
+
+    def _should_speak(self, prediction: GesturePrediction) -> bool:
+        if prediction.confidence < self.min_speech_confidence:
+            return False
+        now = time.monotonic()
+        if now - self._last_spoken_at < self.speech_cooldown_s:
+            return False
+        self._last_spoken_at = now
+        self._last_spoken_label = prediction.label
+        return True
 
     def _source_label(self) -> str:
         if self.hagrid_backend.available:

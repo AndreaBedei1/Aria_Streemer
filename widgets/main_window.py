@@ -215,7 +215,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.connect_button.clicked.connect(lambda: self._run_action("Starting stream", self._connect_and_stream))
         self.stop_stream_button.clicked.connect(
-            lambda: self._run_action("Stopping streaming", self.worker.stop_streaming)
+            lambda: self._run_action("Stopping all", self._stop_all)
         )
         self.experiment_widget.start_button.clicked.connect(
             lambda: self._run_action(
@@ -280,6 +280,11 @@ class MainWindow(QMainWindow):
     def _connect_and_stream(self) -> None:
         self.worker.connect()
         self.worker.start_streaming()
+
+    def _stop_all(self) -> None:
+        self.experiment_manager.stop_experiment()
+        self.gesture_experiment_manager.stop_experiment()
+        self.worker.stop_streaming()
 
     def _apply_style(self) -> None:
         apply_theme(QApplication.instance() or self)

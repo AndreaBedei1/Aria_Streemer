@@ -20,7 +20,9 @@ class SpeechAnnouncer:
         self.cooldown_s = cooldown_s
         self.audio_sink = os.getenv("ARIA_TTS_SINK", "").strip()
         self.sink_keywords = _split_keywords(os.getenv("ARIA_TTS_SINK_KEYWORDS", "aria,glasses,andrea"))
-        self.allow_default_audio = os.getenv("ARIA_TTS_ALLOW_DEFAULT", "").lower() in {"1", "true", "yes"}
+        self.output_mode = os.getenv("ARIA_TTS_OUTPUT", "both").strip().lower()
+        if self.output_mode not in {"both", "default", "glasses"}:
+            self.output_mode = "both"
         self._auto_sink = ""
         self._auto_sink_checked_at = 0.0
         self._last_label = ""
@@ -44,8 +46,13 @@ class SpeechAnnouncer:
     def close(self) -> None:
         self._stop.set()
         self._replace_pending("")
+        self.cancel()
         if self._thread.is_alive():
             self._thread.join(timeout=1.0)
+
+    def cancel(self) -> None:
+        self._replace_pending("")
+        self._cancel_speech_dispatcher()
 
     def _replace_pending(self, text: str) -> None:
         try:
@@ -68,16 +75,24 @@ class SpeechAnnouncer:
             if not text:
                 continue
             audio_sink = self._resolve_audio_sink()
-            if audio_sink:
-                self._move_speech_dispatcher_streams(audio_sink)
-            elif not self.allow_default_audio:
-                LOG.info("TTS skipped because glasses audio sink is not connected")
-                continue
-            if self._speak_with_speech_dispatcher(text, audio_sink):
+            spoken = False
+            if self.output_mode in {"both", "default"}:
+                default_sink = self._find_default_pipewire_sink()
+                if default_sink:
+                    self._move_speech_dispatcher_streams(default_sink)
+                spoken = self._speak_with_speech_dispatcher(text) or spoken
+            if self.output_mode in {"both", "glasses"}:
+                if audio_sink:
+                    spoken = self._speak_with_speech_dispatcher(text, audio_sink, move_stream=True) or spoken
+                elif self.output_mode == "glasses":
+                    LOG.info("TTS skipped because glasses audio sink is not connected")
+            if spoken:
                 continue
             try:
+                if self.output_mode == "glasses" and not audio_sink:
+                    continue
                 if engine is None:
-                    if audio_sink:
+                    if audio_sink and self.output_mode == "glasses":
                         os.environ["PULSE_SINK"] = audio_sink
                     import pyttsx3
 
@@ -102,7 +117,7 @@ class SpeechAnnouncer:
         return self._auto_sink
 
     @staticmethod
-    def _speak_with_speech_dispatcher(text: str, audio_sink: str = "") -> bool:
+    def _speak_with_speech_dispatcher(text: str, audio_sink: str = "", move_stream: bool = False) -> bool:
         if shutil.which("spd-say") is None:
             return False
         try:
@@ -118,11 +133,26 @@ class SpeechAnnouncer:
                 stderr=subprocess.DEVNULL,
                 timeout=3.0,
             )
-            if result.returncode == 0 and audio_sink:
+            if result.returncode == 0 and audio_sink and move_stream:
                 SpeechAnnouncer._move_speech_dispatcher_streams(audio_sink)
             return result.returncode == 0
         except Exception:
             return False
+
+    @staticmethod
+    def _cancel_speech_dispatcher() -> None:
+        if shutil.which("spd-say") is None:
+            return
+        try:
+            subprocess.run(
+                ["spd-say", "-C"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _select_italian_voice(engine) -> None:
@@ -197,6 +227,24 @@ class SpeechAnnouncer:
             LOG.debug("Could not discover PipeWire sinks: %s", exc)
         return ""
 
+    @staticmethod
+    def _find_default_pipewire_sink() -> str:
+        if shutil.which("wpctl") is None:
+            return ""
+        try:
+            status = subprocess.run(
+                ["wpctl", "status"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1.0,
+            ).stdout
+            return _parse_wpctl_default_sink(status)
+        except Exception as exc:
+            LOG.debug("Could not discover default PipeWire sink: %s", exc)
+        return ""
+
 
 def _split_keywords(value: str) -> list[str]:
     return [item.strip().lower() for item in value.split(",") if item.strip()]
@@ -217,3 +265,19 @@ def _parse_wpctl_sinks(status: str) -> list[tuple[str, str]]:
         if match:
             sinks.append((match.group(1), match.group(2).strip()))
     return sinks
+
+
+def _parse_wpctl_default_sink(status: str) -> str:
+    in_sinks = False
+    for line in status.splitlines():
+        if "Sinks:" in line:
+            in_sinks = True
+            continue
+        if in_sinks and "Sink endpoints:" in line:
+            break
+        if not in_sinks or "*" not in line:
+            continue
+        match = re.search(r"\*\s*(\d+)\.", line)
+        if match:
+            return match.group(1)
+    return ""

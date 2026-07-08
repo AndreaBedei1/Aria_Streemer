@@ -32,10 +32,12 @@ experiment:
     - face
 
 gesture_experiment:
-  inference_interval: 0.35
+  inference_interval: 1.0
   weights_path: "./weights/hagrid/YOLOv10n_gestures.pt"
   weights_url: "https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_gestures.pt"
   confidence_threshold: 0.35
+  min_speech_confidence: 0.80
+  speech_cooldown_s: 4.0
   image_size: 640
   device: "cpu"
   auto_download: true

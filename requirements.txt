@@ -1,13 +1,18 @@
+# Real glasses (Linux x86_64 / macOS arm64 only; Python 3.10-3.12):
 projectaria-client-sdk>=2.4.0
+# GUI
 PySide6>=6.7
-pyqtdarktheme>=2.1.0
 qtawesome>=1.4.0
+# Speech announcements for experiments
 pyttsx3>=2.90
+# Signal / image processing
 numpy>=1.26
 scipy>=1.11
 opencv-python>=4.8
 psutil>=5.9
 Pillow>=10.0
 PyYAML>=6.0
+# Vision experiments (YOLO-World / HaGRID)
 ultralytics>=8.3.0
+# Tests
 pytest>=8.0

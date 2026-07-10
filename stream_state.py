@@ -129,6 +129,19 @@ class ConnectionSample:
     sdk_version: str = "unknown"
     status_message: str = "Disconnected"
     profile_name: str = ""
+    # Wi-Fi / device telemetry (None or "" when the SDK does not report it).
+    battery_percent: Optional[int] = None
+    charging: Optional[bool] = None
+    wifi_ssid: str = ""
+    streaming_interface: str = ""
+    batch_period_ms: Optional[int] = None
+    # Control channel (DeviceClient) health. Streaming can outlive it when the
+    # USB cable is unplugged while the device keeps publishing over Wi-Fi.
+    control_alive: bool = True
+    # Receiver-side truth: is the device currently publishing to our server?
+    publishing: Optional[bool] = None
+    publisher_ip: str = ""
+    endpoint_url: str = ""
 
 
 @dataclass

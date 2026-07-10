@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,11 +48,12 @@ def main() -> int:
         app.processEvents()
         window._refresh()
 
-        screenshot_path = "/tmp/aria_gui_smoke.png"
+        tmp_dir = Path(tempfile.gettempdir())
+        screenshot_path = str(tmp_dir / "aria_gui_smoke.png")
         if not window.grab().save(screenshot_path):
             print(f"FAILED: could not save {screenshot_path}")
             return 2
-        canvas_path = "/tmp/aria_gui_smoke_canvas.png"
+        canvas_path = str(tmp_dir / "aria_gui_smoke_canvas.png")
         canvas_image = window.video._canvas.grab().toImage()
         if not canvas_image.save(canvas_path):
             print(f"FAILED: could not save {canvas_path}")

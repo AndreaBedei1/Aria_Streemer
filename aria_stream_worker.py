@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import socket
 import threading
 import time
 from collections import deque
@@ -129,6 +130,18 @@ class AriaStreamWorker:
             "bpm": FpsCounter(window_s=10.0),
         }
         self._device_ip = config.device_ip
+        self._device_serial = ""
+        # Wi-Fi diagnostics / control-channel health, owned by the monitor loop.
+        self._control_alive = True
+        self._control_failures = 0
+        self._last_reconnect_attempt = 0.0
+        self._publishing: Optional[bool] = None
+        self._publisher_ip = ""
+        self._endpoint_url = ""
+        self._battery_percent: Optional[int] = None
+        self._charging: Optional[bool] = None
+        self._wifi_ssid = ""
+        self._active_interface = ""
 
     @property
     def connected(self) -> bool:
@@ -148,32 +161,78 @@ class AriaStreamWorker:
             client_config = self._sdk_gen2.DeviceClientConfig()
             self._device_client.set_client_config(client_config)
 
-            target_ip = self._device_ip or os.getenv("ARIA_DEVICE_IP", "")
-            if self.config.connection_mode == "wifi" and target_ip:
-                target = self._sdk_gen2.DeviceTarget(ip=target_ip)
-                self._device = self._device_client.connect(target)
-            elif target_ip:
-                try:
-                    self._device = self._device_client.connect(
-                        self._sdk_gen2.DeviceTarget(ip=target_ip)
-                    )
-                except Exception:
-                    LOG.info("IP connect failed; trying SDK default discovery")
-                    self._device = self._device_client.connect()
-            else:
-                self._device = self._device_client.connect()
+            self._device = self._connect_control_channel()
 
             device_id = self._safe_call(self._device.connection_id, "")
             serial = self._safe_call(self._device.serial, device_id)
+            self._device_serial = str(serial or "")
             status = self._safe_call(self._device.status, None)
             if status is not None:
-                self._device_ip = str(getattr(status, "wifi_ip_address", "") or target_ip)
+                self._device_ip = str(
+                    getattr(status, "wifi_ip_address", "") or self._device_ip
+                )
+                self._absorb_device_status(status)
             if self.recording_manager is not None:
                 self.recording_manager.set_device(self._device, self._sdk_gen2)
             self._connected = True
+            self._control_alive = True
+            self._control_failures = 0
             self._log_device_context(status)
             self._update_connection("Connected", device_id=serial)
             self._start_monitor()
+
+    def _connect_control_channel(self) -> Any:
+        """Open the DeviceClient control channel.
+
+        Wi-Fi mode follows the official Aria Gen 2 flow: the control channel
+        may come up over USB (recommended: plug the cable, start streaming on
+        WIFI_STA, then unplug) or directly over the network when the glasses
+        IP is known (ARIA_DEVICE_IP / --device-ip).
+        """
+        target_ip = self._device_ip or os.getenv("ARIA_DEVICE_IP", "")
+        attempts: list[str] = []
+
+        if target_ip:
+            try:
+                LOG.info("Connecting control channel via IP %s", target_ip)
+                device = self._device_client.connect(
+                    self._sdk_gen2.DeviceTarget(ip=target_ip)
+                )
+                self._device_ip = target_ip
+                return device
+            except Exception as exc:
+                attempts.append(f"ip {target_ip}: {exc}")
+                LOG.warning(
+                    "IP connect to %s failed (%s); trying SDK default discovery (USB)",
+                    target_ip,
+                    exc,
+                )
+
+        try:
+            LOG.info("Connecting control channel via SDK default discovery (USB)")
+            device = self._device_client.connect()
+            if self.config.connection_mode == "wifi":
+                LOG.info(
+                    "Wi-Fi mode with USB control channel: streaming will use "
+                    "WIFI_STA; the USB cable can be unplugged once streaming "
+                    "has started."
+                )
+            return device
+        except Exception as exc:
+            attempts.append(f"default discovery: {exc}")
+
+        detail = "; ".join(attempts)
+        if self.config.connection_mode == "wifi":
+            raise RuntimeError(
+                "Could not reach the glasses. Tried: "
+                f"{detail}. Plug the USB cable (official Wi-Fi flow) or set "
+                "--device-ip/ARIA_DEVICE_IP to the glasses Wi-Fi IP "
+                "(aria_gen2 device status)."
+            )
+        raise RuntimeError(
+            f"Could not reach the glasses over USB. Tried: {detail}. "
+            "Check the cable and run aria_gen2 device list."
+        )
 
     def disconnect(self) -> None:
         with self._lock:
@@ -186,6 +245,12 @@ class AriaStreamWorker:
             self._device = None
             self._device_client = None
             self._connected = False
+            self._control_alive = True
+            self._control_failures = 0
+            self._publishing = None
+            self._publisher_ip = ""
+            self._battery_percent = None
+            self._charging = None
             if self.recording_manager is not None:
                 self.recording_manager.clear_device()
             self._stop_monitor.set()
@@ -201,29 +266,10 @@ class AriaStreamWorker:
             assert self._receiver_module is not None
             assert self._device is not None
 
-            toggles = self.state.get_toggles()
-            streaming_config = self._sdk_gen2.HttpStreamingConfig()
-            streaming_config.profile_name = self.config.streaming_profile
-            cert_name = self._local_streaming_cert_name()
-            if cert_name and hasattr(streaming_config, "streaming_cert_name"):
-                streaming_config.streaming_cert_name = cert_name
-            try:
-                streaming_config.advanced_config.endpoint.verify_server_certificates = False
-            except Exception:
-                pass
-            if hasattr(streaming_config, "streaming_interface"):
-                if self.config.connection_mode == "wifi":
-                    streaming_config.streaming_interface = (
-                        self._sdk_gen2.StreamingInterface.WIFI_STA
-                    )
-                else:
-                    streaming_config.streaming_interface = (
-                        self._sdk_gen2.StreamingInterface.USB_NCM
-                    )
-                if hasattr(streaming_config, "batch_period_ms"):
-                    streaming_config.batch_period_ms = self.config.stream_batch_ms
+            streaming_config = self.build_streaming_config(self._device)
             self._device.set_streaming_config(streaming_config)
 
+            toggles = self.state.get_toggles()
             image_decode_needed = toggles.rgb or toggles.et_cameras
             self._stream_receiver = self._receiver_module.StreamReceiver(
                 enable_image_decoding=image_decode_needed,
@@ -232,7 +278,20 @@ class AriaStreamWorker:
             self._configure_receiver(self._stream_receiver, toggles)
             try:
                 self._stream_receiver.start_server()
-                self._device.start_streaming()
+                LOG.info(
+                    "Stream receiver listening on 0.0.0.0:%s (ssl=%s)",
+                    self.config.http_server_port,
+                    bool(self._local_streaming_cert_name()),
+                )
+                already = bool(self._safe_call(self._device.is_streaming, False))
+                if already:
+                    LOG.info(
+                        "Device is already streaming; attaching the receiver "
+                        "to the existing session instead of restarting it"
+                    )
+                    self.state.logs.set("Attached to the stream already running on the device")
+                else:
+                    self._device.start_streaming()
             except Exception:
                 try:
                     self._stream_receiver.stop_server()
@@ -241,17 +300,165 @@ class AriaStreamWorker:
                 self._stream_receiver = None
                 raise
             self._streaming = True
+            self._publishing = None
+            self._publisher_ip = ""
+            self._log_streaming_info()
             self._update_connection("Streaming")
             LOG.info("Started streaming profile=%s", self.config.streaming_profile)
+            if self.config.connection_mode == "wifi":
+                self.state.logs.set(
+                    "Wi-Fi streaming started. The USB cable can be unplugged; "
+                    "plug it back (or use the glasses IP) to stop the stream."
+                )
+
+    def build_streaming_config(self, device: Any) -> Any:
+        """Build the HttpStreamingConfig for the current mode.
+
+        USB keeps the historical behaviour. Wi-Fi mirrors the official flow
+        (aria_gen2 streaming start --interface wifi_sta --batch-period-ms 200)
+        plus keep_streaming_on_disconnection so the stream survives the USB
+        unplug and transient Wi-Fi drops.
+        """
+        streaming_config = self._sdk_gen2.HttpStreamingConfig()
+        streaming_config.profile_name = self.config.streaming_profile
+        cert_name = self._local_streaming_cert_name()
+        if cert_name and hasattr(streaming_config, "streaming_cert_name"):
+            streaming_config.streaming_cert_name = cert_name
+        try:
+            streaming_config.advanced_config.endpoint.verify_server_certificates = False
+        except Exception:
+            pass
+
+        batch_ms = self.config.effective_stream_batch_ms
+        if hasattr(streaming_config, "streaming_interface"):
+            if self.config.connection_mode == "wifi":
+                streaming_config.streaming_interface = (
+                    self._sdk_gen2.StreamingInterface.WIFI_STA
+                )
+            else:
+                streaming_config.streaming_interface = (
+                    self._sdk_gen2.StreamingInterface.USB_NCM
+                )
+            if hasattr(streaming_config, "batch_period_ms"):
+                streaming_config.batch_period_ms = batch_ms
+
+        if self.config.connection_mode == "wifi":
+            self._prepare_wifi_streaming(device, streaming_config, cert_name)
+        else:
+            self._active_interface = "USB_NCM"
+            self._endpoint_url = ""
+
+        LOG.info(
+            "Streaming config: interface=%s profile=%s batch_ms=%s cert=%s "
+            "keep_on_disconnection=%s endpoint=%s",
+            self._active_interface or self.config.connection_mode,
+            self.config.streaming_profile,
+            batch_ms,
+            cert_name or "none (ssl off)",
+            getattr(streaming_config, "keep_streaming_on_disconnection", "n/a"),
+            self._endpoint_url or "SDK default (mDNS oatmeal_server.local)",
+        )
+        return streaming_config
+
+    def _prepare_wifi_streaming(
+        self, device: Any, streaming_config: Any, cert_name: str
+    ) -> None:
+        self._active_interface = "WIFI_STA"
+        status = self._safe_call(device.status, None)
+        wifi_connected = bool(getattr(status, "wifi_connected", False)) if status else False
+        wifi_ip = str(getattr(status, "wifi_ip_address", "") or "") if status else ""
+        ssid = str(getattr(status, "wifi_ssid", "") or "") if status else ""
+        if status is not None and not wifi_connected:
+            raise RuntimeError(
+                "The glasses are not connected to a Wi-Fi network, so WIFI_STA "
+                "streaming cannot start. Connect them first: aria_gen2 device "
+                "wifi connect --ssid <SSID> --password <password>"
+            )
+        if wifi_ip:
+            self._device_ip = wifi_ip
+        if ssid:
+            self._wifi_ssid = ssid
+        LOG.info(
+            "Glasses Wi-Fi status: connected=%s ssid=%s ip=%s",
+            wifi_connected,
+            ssid or "?",
+            wifi_ip or "?",
+        )
+
+        # The device publishes to the receiver URL. The SDK default is
+        # https://oatmeal_server.local:6768 resolved via mDNS, which breaks on
+        # networks that block mDNS and can resolve to the USB-NCM address that
+        # dies when the cable is unplugged. Prefer an explicit URL on the
+        # host interface that routes towards the glasses Wi-Fi IP.
+        endpoint = self.config.wifi_endpoint_url
+        if not endpoint and wifi_ip:
+            host_ip = self._host_ip_toward(wifi_ip)
+            if host_ip:
+                scheme = "https" if cert_name else "http"
+                endpoint = f"{scheme}://{host_ip}:{self.config.http_server_port}"
+        if endpoint:
+            try:
+                streaming_config.advanced_config.endpoint.url = endpoint
+                self._endpoint_url = endpoint
+            except Exception as exc:
+                LOG.warning("Could not set explicit streaming endpoint: %s", exc)
+                self._endpoint_url = ""
+        else:
+            self._endpoint_url = ""
+            LOG.warning(
+                "No explicit receiver endpoint available (glasses Wi-Fi IP "
+                "unknown). Falling back to SDK mDNS discovery "
+                "(oatmeal_server.local); if streaming never connects, pass "
+                "--wifi-endpoint https://<host-ip>:%s",
+                self.config.http_server_port,
+            )
+
+        if hasattr(streaming_config, "keep_streaming_on_disconnection"):
+            # Official flag behind `aria_gen2 streaming start
+            # --keep-streaming-on-disconnection`: without it the device stops
+            # publishing when the control channel or Wi-Fi drops briefly.
+            streaming_config.keep_streaming_on_disconnection = True
+
+    @staticmethod
+    def _host_ip_toward(remote_ip: str) -> str:
+        """Local IP of the interface that routes towards remote_ip."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect((remote_ip, 9))
+                return str(probe.getsockname()[0])
+        except Exception as exc:
+            LOG.warning("Could not determine host IP towards %s: %s", remote_ip, exc)
+            return ""
+
+    def _log_streaming_info(self) -> None:
+        info = self._safe_call(getattr(self._device, "get_streaming_info", lambda: None), None)
+        if info is None:
+            return
+        try:
+            interface = getattr(info, "streaming_interface", None)
+            if interface:
+                self._active_interface = str(interface)
+            LOG.info(
+                "Device streaming info: is_streaming=%s profile=%s interface=%s",
+                getattr(info, "is_streaming", None),
+                getattr(info, "profile_name", None),
+                interface,
+            )
+        except Exception:
+            LOG.debug("Could not read streaming info", exc_info=True)
 
     def stop_streaming(self) -> None:
         with self._lock:
             if not self._streaming and self._stream_receiver is None:
                 return
+            device_stopped = True
             if self._device is not None and self._streaming:
+                if not self._control_alive:
+                    self._try_reconnect_control("stop streaming")
                 try:
                     self._device.stop_streaming()
                 except Exception:
+                    device_stopped = False
                     LOG.exception("Failed to stop device streaming")
             if self._stream_receiver is not None:
                 try:
@@ -260,7 +467,17 @@ class AriaStreamWorker:
                     LOG.exception("Failed to stop stream receiver")
             self._stream_receiver = None
             self._streaming = False
-            self._update_connection("Connected")
+            self._publishing = None
+            self._publisher_ip = ""
+            if not device_stopped:
+                message = (
+                    "Receiver stopped, but the glasses could not be reached and "
+                    "may still be streaming. Plug the USB cable back in and "
+                    "press Stop again, or run: aria_gen2 streaming stop"
+                )
+                LOG.warning(message)
+                self.state.logs.set(message)
+            self._update_connection("Connected" if self._control_alive else "Control channel lost")
 
     def reset_statistics(self) -> None:
         for counter in self._fps.values():
@@ -496,7 +713,9 @@ class AriaStreamWorker:
             eye_state, blink_rate, perclos = self._blink.update(ts, valid)
             rgb = self.state.rgb_frame.get()
             gaze_pt = None
-            if rgb is not None:
+            # Only project real, currently-valid gaze; never draw an overlay
+            # from stale or invalid angles.
+            if rgb is not None and valid is not False:
                 gaze_pt = project_gaze_to_rgb(
                     yaw, pitch, rgb.width, rgb.height, rgb.label,
                     calibration=getattr(self, "_device_calibration", None),
@@ -618,6 +837,11 @@ class AriaStreamWorker:
             try:
                 status = self._safe_call(self._device.status, None) if self._device else None
                 device_id = self._safe_call(self._device.connection_id, "") if self._device else ""
+                self._note_control_result(status is not None or bool(device_id))
+
+                if not self._control_alive and self.config.connection_mode == "wifi":
+                    self._maybe_reconnect_control()
+
                 is_recording = bool(self._safe_call(self._device.is_recording, False)) if self._device else False
                 if is_recording and not self.state.get_recording().active:
                     self.state.update_recording(
@@ -631,12 +855,15 @@ class AriaStreamWorker:
                     if not rec.starting and not rec.stopping:
                         self.state.update_recording(active=False)
                 if status is not None:
+                    self._absorb_device_status(status)
                     temp = self._finite_or_none(getattr(status, "skin_temp_celsius", None))
                     if temp is not None:
                         self.state.temperature.set(
                             self._temperature_sample(time.monotonic(), temp, "device skin")
                         )
-                    self._device_ip = str(getattr(status, "wifi_ip_address", "") or self._device_ip)
+
+                self._poll_receiver_connections()
+
                 cpu = psutil.cpu_percent(interval=None) if psutil is not None else None
                 ram = psutil.virtual_memory().percent if psutil is not None else None
                 perf = PerformanceSample(
@@ -646,13 +873,13 @@ class AriaStreamWorker:
                     overwrite_counts=self.state.buffer_overwrites(),
                     cpu_percent=cpu,
                     ram_percent=ram,
-                    connection_state="Streaming" if self._streaming else "Connected",
+                    connection_state=self._connection_state_label(),
                     recording_state="ON" if is_recording else "OFF",
                 )
                 self.state.performance.set(perf)
                 self._update_connection(
-                    "Streaming" if self._streaming else "Connected",
-                    device_id=device_id,
+                    self._connection_state_label(),
+                    device_id=device_id or self._device_serial,
                     recording=is_recording,
                 )
                 if self.state.als.get() is None:
@@ -666,6 +893,124 @@ class AriaStreamWorker:
                     )
             except Exception:
                 LOG.exception("Monitor loop failed")
+
+    def _connection_state_label(self) -> str:
+        if self._streaming:
+            if not self._control_alive:
+                return "Streaming (control channel lost)"
+            return "Streaming"
+        if not self._control_alive:
+            return "Control channel lost"
+        return "Connected"
+
+    def _note_control_result(self, ok: bool) -> None:
+        """Track control-channel health from device.status() outcomes.
+
+        A few consecutive failures mean the DeviceClient link is gone — e.g.
+        the USB cable was unplugged while streaming over Wi-Fi. Streaming is
+        judged separately via the receiver, so this must not stop the stream.
+        """
+        if ok:
+            if not self._control_alive:
+                LOG.info("Control channel to the glasses is back")
+                self.state.logs.set("Control channel restored")
+            self._control_alive = True
+            self._control_failures = 0
+            return
+        self._control_failures += 1
+        if self._control_failures == 3 and self._control_alive:
+            self._control_alive = False
+            if self._streaming and self.config.connection_mode == "wifi":
+                message = (
+                    "Control channel lost (USB unplugged?). Wi-Fi streaming "
+                    "continues; data below is still live from the receiver."
+                )
+            else:
+                message = "Control channel to the glasses lost"
+            LOG.warning(message)
+            self.state.logs.set(message)
+
+    def _maybe_reconnect_control(self, interval_s: float = 6.0) -> None:
+        now = time.monotonic()
+        if now - self._last_reconnect_attempt < interval_s:
+            return
+        self._last_reconnect_attempt = now
+        self._try_reconnect_control("monitor")
+
+    def _try_reconnect_control(self, reason: str) -> None:
+        if self._device_client is None:
+            return
+        target_ip = self._device_ip
+        try:
+            if target_ip:
+                LOG.info("Reconnecting control channel via %s (%s)", target_ip, reason)
+                device = self._device_client.connect(
+                    self._sdk_gen2.DeviceTarget(ip=target_ip)
+                )
+            else:
+                LOG.info("Reconnecting control channel via USB discovery (%s)", reason)
+                device = self._device_client.connect()
+        except Exception as exc:
+            LOG.debug("Control reconnect failed (%s): %s", reason, exc)
+            return
+        with self._lock:
+            self._device = device
+            if self.recording_manager is not None:
+                self.recording_manager.set_device(device, self._sdk_gen2)
+        self._note_control_result(True)
+
+    def _absorb_device_status(self, status: Any) -> None:
+        battery = getattr(status, "battery_level", None)
+        try:
+            self._battery_percent = int(battery) if battery is not None else None
+        except Exception:
+            self._battery_percent = None
+        charging = getattr(status, "charging", None)
+        self._charging = bool(charging) if charging is not None else None
+        ssid = str(getattr(status, "wifi_ssid", "") or "")
+        if ssid:
+            self._wifi_ssid = ssid
+        self._device_ip = str(getattr(status, "wifi_ip_address", "") or self._device_ip)
+
+    def _poll_receiver_connections(self) -> None:
+        """Receiver-side truth: is the device publishing to our HTTP server?
+
+        AriaGen2HttpServer.connections() lists active device connections
+        (device_serial, connection_id, client_ip); the SDK documents polling
+        it to detect connect/reconnect/disconnect. This keeps working after
+        the USB cable is unplugged, when device.status() no longer answers.
+        """
+        receiver = self._stream_receiver
+        server = getattr(receiver, "server", None) if receiver is not None else None
+        if server is None:
+            return
+        try:
+            connections = server.connections()
+        except Exception:
+            return
+        publishing = bool(connections)
+        publisher_ip = ""
+        if connections:
+            first = connections[0]
+            publisher_ip = str(first.get("client_ip", "") or "")
+        if publishing != self._publishing:
+            if publishing:
+                LOG.info(
+                    "Device connected to the receiver (serial=%s ip=%s)",
+                    connections[0].get("device_serial", "?"),
+                    publisher_ip or "?",
+                )
+                self.state.logs.set(
+                    f"Receiving stream from the glasses ({publisher_ip or 'unknown ip'})"
+                )
+            elif self._publishing is not None:
+                LOG.warning("Device disconnected from the receiver")
+                self.state.logs.set(
+                    "The glasses stopped publishing to the receiver. Waiting "
+                    "for automatic reconnection..."
+                )
+        self._publishing = publishing
+        self._publisher_ip = publisher_ip
 
     def _log_device_context(self, status: Any) -> None:
         device_id = self._safe_call(self._device.connection_id, "") if self._device else ""
@@ -704,11 +1049,23 @@ class AriaStreamWorker:
                 streaming=self._streaming,
                 recording=rec.active if recording is None else recording,
                 mode=self.config.connection_mode,
-                device_id=device_id,
+                device_id=device_id or self._device_serial,
                 device_ip=self._device_ip,
                 sdk_version=self._sdk_version,
                 status_message=message,
                 profile_name=self.config.streaming_profile,
+                # Battery/charging are live device readings: report them only
+                # while the control channel actually answers, otherwise the UI
+                # would show a stale value as current.
+                battery_percent=self._battery_percent if self._control_alive else None,
+                charging=self._charging if self._control_alive else None,
+                wifi_ssid=self._wifi_ssid,
+                streaming_interface=self._active_interface,
+                batch_period_ms=self.config.effective_stream_batch_ms,
+                control_alive=self._control_alive,
+                publishing=self._publishing,
+                publisher_ip=self._publisher_ip,
+                endpoint_url=self._endpoint_url,
             )
         )
 

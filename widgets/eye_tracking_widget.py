@@ -1,92 +1,129 @@
 from __future__ import annotations
 
-from collections import deque
-from typing import Deque, Optional
+import math
+from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from stream_state import EyeTrackingSample, PupilSample
-from widgets.theme import Colors
+from widgets.theme import make_chip, set_chip, set_widget_property
 
 
 class EyeTrackingWidget(QWidget):
+    """Gaze / blink metrics computed from the real EyeGaze stream.
+
+    Every row shows N/A until the corresponding real signal arrives. Pupil
+    diameter is not exposed by the live Gen 2 EyeGaze callback, so in real
+    mode that row stays N/A by design (mock mode fills it with mock data).
+    """
+
     def __init__(self):
         super().__init__()
-        self.title = QLabel("Eye tracking")
+        self.title = QLabel("EYE TRACKING · GAZE")
         self.title.setObjectName("panelTitle")
-        self.gaze = QLabel("Yaw/Pitch: --")
-        self.blink = QLabel("Blink: --")
-        self.pupil = QLabel("Pupils: not available")
-        self.plot = _PupilPlot()
+        self.state_chip = make_chip("WAITING", tone="")
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        header.addWidget(self.title, 1)
+        header.addWidget(self.state_chip, 0)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(5)
+
+        self._rows: dict[str, QLabel] = {}
+        for row, (key, caption) in enumerate(
+            (
+                ("looking", "Looking"),
+                ("gaze", "Yaw / Pitch"),
+                ("depth", "Depth"),
+                ("blink", "Blink rate"),
+                ("perclos", "PERCLOS (30 s)"),
+                ("pupils", "Pupil diameter"),
+            )
+        ):
+            label = QLabel(caption)
+            label.setObjectName("metricLabel")
+            value = QLabel("N/A")
+            value.setObjectName("metricValue")
+            value.setProperty("tone", "na")
+            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            grid.addWidget(label, row, 0)
+            grid.addWidget(value, row, 1)
+            self._rows[key] = value
+        grid.setColumnStretch(1, 1)
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(self.title)
-        layout.addWidget(self.gaze)
-        layout.addWidget(self.blink)
-        layout.addWidget(self.pupil)
-        layout.addWidget(self.plot)
+        layout.addLayout(header)
+        layout.addLayout(grid)
+
+    def _set_row(self, key: str, text: str, tone: str = "") -> None:
+        value = self._rows[key]
+        value.setText(text)
+        set_widget_property(value, "tone", tone)
 
     def update_sample(
         self,
         sample: Optional[EyeTrackingSample],
         pupil: Optional[PupilSample],
+        stale: bool = False,
     ) -> None:
         if sample is None:
-            self.gaze.setText("Yaw/Pitch: --")
-            self.blink.setText("Blink: --")
+            set_chip(self.state_chip, "WAITING", "")
+            for key in ("looking", "gaze", "depth", "blink", "perclos"):
+                self._set_row(key, "N/A", "na")
         else:
-            yaw = "--" if sample.yaw_rad is None else f"{sample.yaw_rad:+.3f}"
-            pitch = "--" if sample.pitch_rad is None else f"{sample.pitch_rad:+.3f}"
-            self.gaze.setText(f"Yaw/Pitch: {yaw} / {pitch} rad")
-            blink_rate = "--" if sample.blink_rate_per_min is None else f"{sample.blink_rate_per_min:.0f}"
-            perclos = "--" if sample.perclos is None else f"{sample.perclos * 100:.0f}%"
-            self.blink.setText(f"Blink/min: {blink_rate} | PERCLOS: {perclos}")
+            if stale:
+                set_chip(self.state_chip, "STALE", "warn")
+            elif sample.combined_gaze_valid is False:
+                set_chip(self.state_chip, sample.eye_state.upper(), "warn")
+            elif sample.combined_gaze_valid:
+                set_chip(self.state_chip, sample.eye_state.upper(), "good")
+            else:
+                set_chip(self.state_chip, "WAITING", "")
 
-        if pupil is None:
-            self.pupil.setText("Pupils: not available")
+            self._set_row(
+                "looking",
+                sample.looking_state if sample.looking_state else "N/A",
+                "" if sample.looking_state else "na",
+            )
+            if sample.yaw_rad is None or sample.pitch_rad is None:
+                self._set_row("gaze", "N/A", "na")
+            else:
+                self._set_row(
+                    "gaze",
+                    f"{math.degrees(sample.yaw_rad):+.1f}° / {math.degrees(sample.pitch_rad):+.1f}°",
+                )
+            if sample.depth_m is None:
+                self._set_row("depth", "N/A", "na")
+            else:
+                self._set_row("depth", f"{sample.depth_m:.2f} m")
+            if sample.blink_rate_per_min is None:
+                self._set_row("blink", "N/A", "na")
+            else:
+                self._set_row("blink", f"{sample.blink_rate_per_min:.0f} /min")
+            if sample.perclos is None:
+                self._set_row("perclos", "N/A", "na")
+            else:
+                perclos_pct = sample.perclos * 100.0
+                self._set_row(
+                    "perclos",
+                    f"{perclos_pct:.0f} %",
+                    "warn" if perclos_pct >= 25.0 else "",
+                )
+
+        if (
+            pupil is None
+            or (pupil.left_diameter_mm is None and pupil.right_diameter_mm is None)
+        ):
+            self._set_row("pupils", "N/A · not in live SDK", "na")
         else:
             left = "--" if pupil.left_diameter_mm is None else f"{pupil.left_diameter_mm:.1f}"
             right = "--" if pupil.right_diameter_mm is None else f"{pupil.right_diameter_mm:.1f}"
-            lux = "--" if pupil.ambient_lux is None else f"{pupil.ambient_lux:.0f} lux"
-            self.pupil.setText(f"Pupils L/R: {left} / {right} mm | {lux}")
-            if pupil.left_diameter_mm is not None or pupil.right_diameter_mm is not None:
-                value = pupil.left_diameter_mm or pupil.right_diameter_mm or 0.0
-                self.plot.add_value(value)
-
-
-class _PupilPlot(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setMinimumHeight(58)
-        self._values: Deque[float] = deque(maxlen=80)
-
-    def add_value(self, value: float) -> None:
-        self._values.append(value)
-        self.update()
-
-    def paintEvent(self, event):  # noqa: N802
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect().adjusted(1, 1, -1, -1)
-        painter.fillRect(rect, QColor(Colors.CANVAS))
-        painter.setPen(QPen(QColor(Colors.CANVAS_BORDER), 1))
-        painter.drawRect(rect)
-        if len(self._values) < 2:
-            painter.setPen(QColor(Colors.TEXT_MUTED))
-            painter.drawText(rect, Qt.AlignCenter, "Pupil trend")
-            return
-        values = list(self._values)
-        min_v, max_v = min(values), max(values)
-        span = max(0.1, max_v - min_v)
-        path = QPainterPath()
-        for i, value in enumerate(values):
-            x = rect.left() + i / max(1, len(values) - 1) * rect.width()
-            y = rect.bottom() - (value - min_v) / span * rect.height()
-            if i == 0:
-                path.moveTo(x, y)
-            else:
-                path.lineTo(x, y)
-        painter.setPen(QPen(QColor(Colors.INFO), 2))
-        painter.drawPath(path)
+            self._set_row("pupils", f"L {left} / R {right} mm")

@@ -14,7 +14,12 @@ from stream_state import SharedStreamState
 from widgets.theme import ICON_SIZE, icon
 
 
+_PLACEHOLDER_LABELS = {"unknown", "initializing...", "stopped", "waiting for hand data"}
+
+
 class ExperimentWidget(QWidget):
+    """Start/stop card for the vision experiments (object / gesture)."""
+
     def __init__(
         self,
         output_dir: str,
@@ -24,38 +29,42 @@ class ExperimentWidget(QWidget):
     ):
         super().__init__()
         self.value_prefix = value_prefix
-        self.title = QLabel(title)
+        self.title = QLabel(title.upper())
         self.title.setObjectName("panelTitle")
         self.status = QLabel("OFF")
         self.status.setObjectName("recOff")
-        self.status.setMinimumWidth(48)
+        self.status.setMinimumWidth(46)
         self.status.setAlignment(Qt.AlignCenter)
-        
+
+        # Kept for API compatibility with the managers/tests.
         self.detected_object = QLabel(f"{self.value_prefix}: --")
         self.confidence = QLabel("Confidence: --")
+
         self.object_caption = QLabel(caption)
-        self.object_caption.setObjectName("muted")
+        self.object_caption.setObjectName("panelCaption")
         self.object_value = QLabel("--")
         self.object_value.setObjectName("objectValue")
         self.object_value.setAlignment(Qt.AlignCenter)
         self.object_value.setWordWrap(True)
         self.details = QLabel("Confidence: --")
-        self.details.setObjectName("muted")
+        self.details.setObjectName("metricLabel")
         self.details.setAlignment(Qt.AlignCenter)
         self.details.setWordWrap(True)
-        
+
         self.output_dir = QLineEdit(output_dir)
         self.output_dir.setVisible(False)
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
         self.start_button.setProperty("variant", "primary")
         self.stop_button.setProperty("variant", "danger")
-        self.start_button.setIcon(icon("fa5s.play"))
+        self.start_button.setIcon(icon("fa5s.play", color="#06130d"))
         self.stop_button.setIcon(icon("fa5s.stop"))
         self.start_button.setIconSize(ICON_SIZE)
         self.stop_button.setIconSize(ICON_SIZE)
         self.start_button.setToolTip("Start experiment")
         self.stop_button.setToolTip("Stop experiment")
+        self.start_button.setCursor(Qt.PointingHandCursor)
+        self.stop_button.setCursor(Qt.PointingHandCursor)
         self.stop_button.setEnabled(False)
 
         header = QHBoxLayout()
@@ -72,7 +81,7 @@ class ExperimentWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(7)
         layout.addLayout(header)
         layout.addLayout(buttons)
         layout.addStretch(1)
@@ -96,7 +105,7 @@ class ExperimentWidget(QWidget):
             self.status.setObjectName("recOff")
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
-            
+
         self.status.style().unpolish(self.status)
         self.status.style().polish(self.status)
 
@@ -104,7 +113,7 @@ class ExperimentWidget(QWidget):
         if result:
             label = str(result.get("label", "--") or "--")
             conf = float(result.get("conf", 0.0) or 0.0)
-            if label.lower() in {"unknown", "initializing...", "stopped", "waiting for hand data"}:
+            if label.lower() in _PLACEHOLDER_LABELS:
                 display_label = "--" if not is_active else label
             else:
                 display_label = label

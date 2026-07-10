@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import time
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtGui import QImage
@@ -57,7 +59,9 @@ def test_video_widget_mock_screenshot_is_not_flat_yellow() -> None:
     app.processEvents()
 
     screenshot = widget.grab().toImage()
-    assert screenshot.save("/tmp/aria_video_widget_mock_screenshot.png")
+    assert screenshot.save(
+        str(Path(tempfile.gettempdir()) / "aria_video_widget_mock_screenshot.png")
+    )
     rgb = _qimage_to_rgb(screenshot)
     quality = assess_display_quality(rgb)
 

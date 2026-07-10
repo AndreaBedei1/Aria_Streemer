@@ -1,300 +1,251 @@
-# Aria Gen 2 Realtime Demo Dashboard
+# Aria Streamer — Gen 2 Live Dashboard
 
-Dashboard locale PySide6 per demo pubbliche con Meta Project Aria Gen 2.
+Dashboard locale PySide6 per demo con Meta Project Aria Gen 2: camera con gaze
+overlay, eye tracking (blink/PERCLOS), BPM da PPG, hand tracking, esperimenti
+di visione (oggetto guardato, gesti) — senza `aria_streaming_viewer` e senza
+Rerun.
 
-Obiettivo: mostrare in realtime camera RGB, gaze, blink/PERCLOS, pupille se disponibili,
-PPG/BPM, qualita PPG, pulse variability, hand tracking, ALS/temperatura e performance,
-senza usare `aria_streaming_viewer` e senza usare Rerun come viewer principale.
+L'interfaccia è una dashboard scura professionale:
 
-La app lavora in due modi:
+- **header** con badge modalità (USB / WI-FI / MOCK), pill di stato
+  (DISCONNECTED → CONNECTING → CONNECTED → STREAMING, con stati degradati
+  `STREAMING · NO CONTROL` e `STREAMING · NO DATA`), chip batteria / rete
+  Wi-Fi / temperatura del device e pulsanti Start/Stop;
+- **pannello video hero** con overlay gaze, bounding box esperimenti, chip
+  LIVE / STALE / WAITING e fps correnti;
+- **colonna metriche**: Heart Rate (BPM, qualità segnale, variabilità, trend
+  60 s), Eye Tracking (direzione, yaw/pitch, profondità, blink rate, PERCLOS,
+  pupille), Hand Tracking (skeleton L/R con confidenza), card esperimenti;
+- **status bar** diagnostica: seriale device, profilo, interfaccia di
+  streaming, batch ms, endpoint receiver, stato RX e versione SDK, più
+  l'ultimo messaggio di log.
 
-- Preview Mode: default, mostra solo dati realtime e non salva dati.
-- Experiment Mode: parte solo con `Inizia esperimento`, abilita un modello di visione artificiale YOLO-World in background per riconoscere l'oggetto guardato e salva un log CSV.
+## Politica dati reali
+
+In modalità reale (USB o Wi-Fi) la dashboard mostra **solo** dati ricevuti
+dagli occhiali o metriche calcolate da quei dati (blink rate e PERCLOS dalla
+validità del gaze, BPM dal PPG grezzo). Quando un dato non è disponibile o non
+è affidabile compare `N/A`, `Waiting for real data...` o l'equivalente — mai
+valori inventati. In particolare:
+
+- **BPM**: resta `--` finché il PPG reale non produce una stima stabile; la
+  card riporta il motivo (`Not enough PPG data`, qualità POOR, ...).
+- **Pupille**: la callback EyeGaze live dell'SDK Gen 2 (verificato su
+  `projectaria-client-sdk` 2.4.0) non espone il diametro pupillare → la riga
+  resta `N/A · not in live SDK`.
+- **ALS**: nessuna callback nel receiver di questa build → non mostrato.
+- **Batteria/temperatura**: sono letture live; se il canale di controllo cade
+  (cavo USB scollegato) spariscono invece di congelarsi sull'ultimo valore.
+- **Gaze overlay**: disegnato solo quando `combined_gaze_valid` non è False.
+- I dati sintetici esistono **solo** in `--mock` (worker separato in `mock/`).
 
 ## Installazione
 
-Usare il virtualenv Project Aria Gen 2 gia configurato:
+`projectaria-client-sdk` pubblica wheel solo per **Linux x86_64 e macOS Apple
+Silicon (Python 3.10–3.12)**: la modalità reale richiede una di queste
+piattaforme. Su Windows funzionano modalità mock e test.
 
 ```bash
+python3 -m venv ~/projectaria_gen2_python_env
 source ~/projectaria_gen2_python_env/bin/activate
-cd /home/andrea/Desktop/Aria_Streemer
+cd <repo>/Aria_Streemer
 pip install -r requirements.txt
 ```
 
-Il pacchetto SDK ufficiale e `projectaria-client-sdk`. Questa app usa le API Gen 2:
-
-- `aria.sdk_gen2.DeviceClient`
-- `aria.sdk_gen2.DeviceTarget`
-- `aria.sdk_gen2.HttpStreamingConfig`
-- `aria.sdk_gen2.RecordingConfig`
-- `aria.stream_receiver.StreamReceiver`
-- callback ufficiali come `register_rgb_callback`, `register_et_callback`,
-  `register_eye_gaze_callback`, `register_hand_pose_callback`, `register_ppg_callback`
-  e `register_barometer_callback`.
-
-## Setup SDK e sample ufficiali
-
-Verifica il dispositivo:
+Verifica del device e pairing:
 
 ```bash
-source ~/projectaria_gen2_python_env/bin/activate
 aria_doctor
 aria_gen2 device list
-aria_gen2 auth check
+aria_gen2 auth check          # se serve: aria_gen2 auth pair
 ```
 
-Se serve pairing:
+API Gen 2 usate (verificate contro l'SDK 2.4.0 installato, vedi
+`tests/test_sdk_contract.py`):
+
+- `aria.sdk_gen2.DeviceClient` / `DeviceTarget` / `HttpStreamingConfig`
+  (incl. `streaming_interface`, `batch_period_ms`,
+  `keep_streaming_on_disconnection`, `advanced_config.endpoint.url`)
+- `aria.stream_receiver.StreamReceiver` + callback tipizzate
+  (`register_rgb_callback`, `register_slam_callback`, `register_et_callback`,
+  `register_eye_gaze_callback`, `register_hand_pose_callback`,
+  `register_ppg_callback`, `register_barometer_callback`)
+- `AriaGen2HttpServer.connections()` per rilevare lato receiver se gli
+  occhiali stanno effettivamente pubblicando (usato per lo stato RX e per il
+  flusso "scollega il cavo").
+
+## Modalità USB (consigliata per stabilità)
 
 ```bash
-aria_gen2 auth pair
-```
-
-Estrai i sample ufficiali:
-
-```bash
-python3 -m aria.extract_sdk_samples --output ~
-ls ~/projectaria_client_sdk_samples_gen2
-```
-
-Sample usati come riferimento:
-
-- `device_connect.py`
-- `device_streaming.py`
-- `device_raw_streaming.py`
-- `device_record.py`
-
-## Avvio in modalita reale
-
-USB, consigliato per stabilita:
-
-```bash
-source ~/projectaria_gen2_python_env/bin/activate
 python app.py --usb
 ```
 
-WiFi STA:
+Interfaccia `USB_NCM`, batch 20 ms (default storico, invariato).
+
+## Modalità Wi-Fi
+
+Prerequisito: occhiali connessi a una rete Wi-Fi raggiungibile dal PC
+(`aria_gen2 device wifi connect --ssid <SSID> --password <password>`), oppure
+stessa rete del PC.
+
+### Flusso ufficiale: parti via USB, poi scollega il cavo
+
+È il flusso raccomandato dalla documentazione Aria Gen 2 e quello che l'app
+implementa:
 
 ```bash
-source ~/projectaria_gen2_python_env/bin/activate
-ARIA_DEVICE_IP=192.168.159.37 python app.py --wifi
+# cavo USB collegato
+python app.py --wifi
+# premi "Start Streaming", verifica il pill STREAMING, poi scollega il cavo
 ```
 
-Parametri utili:
+Cosa fa l'app in `--wifi`:
+
+1. apre il canale di controllo (via IP se `--device-ip`/`ARIA_DEVICE_IP` è
+   impostato, altrimenti via USB come da flusso ufficiale);
+2. verifica che gli occhiali siano connessi a una rete Wi-Fi (altrimenti
+   errore chiaro con il comando CLI da eseguire);
+3. configura `StreamingInterface.WIFI_STA` con `batch_period_ms = 200`
+   (raccomandazione ufficiale per il wireless; override con
+   `--stream-batch-ms`) e `keep_streaming_on_disconnection = True`, così lo
+   stream sopravvive allo scollegamento del cavo e ai drop transitori;
+4. imposta come endpoint del receiver l'IP dell'interfaccia host che instrada
+   verso l'IP Wi-Fi degli occhiali (es. `https://192.168.1.10:6768`), evitando
+   il default mDNS `oatmeal_server.local` che su molte reti è bloccato o può
+   risolversi sull'indirizzo USB che muore con il cavo; override manuale con
+   `--wifi-endpoint https://<ip-host>:6768`;
+5. avvia il receiver e lo streaming; se il device sta già streammando (es.
+   avviato da CLI) l'app si aggancia alla sessione esistente senza riavviarla.
+
+Dopo lo scollegamento del cavo:
+
+- il monitor rileva la perdita del canale di controllo (3 status falliti) e
+  mostra `STREAMING · NO CONTROL`; i dati continuano ad arrivare dal receiver
+  e lo stato RX in status bar conferma che gli occhiali pubblicano ancora;
+- l'app ritenta la riconnessione del controllo ogni ~6 s (via IP Wi-Fi noto o
+  USB quando ricolleghi il cavo); al ripristino compare `Control channel
+  restored`;
+- **Stop** ferma sempre il receiver locale; se il device non è raggiungibile
+  avvisa di ricollegare il cavo o usare `aria_gen2 streaming stop`.
+
+### Controllo direttamente via Wi-Fi (senza cavo)
+
+```bash
+python app.py --wifi --device-ip 192.168.1.42
+# oppure: ARIA_DEVICE_IP=192.168.1.42 python app.py --wifi
+```
+
+L'IP degli occhiali è in `aria_gen2 device status` (campo `wifi_ip_address`).
+
+### Parametri utili
 
 ```bash
 python app.py --rgb-fps 10 --ht-fps 10 --et-fps 5 --hr-update-hz 1
 python app.py --rgb-width 960 --rgb-height 540
+python app.py --stream-batch-ms 200       # default: 20 USB, 200 Wi-Fi
+python app.py --wifi-endpoint https://192.168.1.10:6768
 python app.py --output-dir ./recordings
 python app.py --debug-streams
 python app.py --debug-image-dump /tmp/aria_gui_debug
-python app.py --decode-rgb
 ```
 
-Default demo: la preview principale usa una camera SLAM frontale in scala di
-grigi a bassa latenza con gaze overlay. `--decode-rgb` abilita il flusso RGB
-H265 a colori, ma puo aumentare molto il ritardo su Linux.
-
-## Avvio in modalita mock
+## Modalità mock (senza occhiali, anche su Windows)
 
 ```bash
-source ~/projectaria_gen2_python_env/bin/activate
 python app.py --mock
 ```
 
-La modalita mock genera dati finti ma realistici per RGB, ET cameras, gaze,
-pupille, blink/PERCLOS, PPG/BPM, qualita PPG, pulse variability e mani.
+Genera RGB, ET, gaze, pupille, blink/PERCLOS, PPG/BPM e mani sintetici,
+etichettati come mock nell'interfaccia.
 
-## Esperimento Gaze Object Detection
+## Esperimenti (oggetto guardato / gesti)
 
-L'app include una modalità sperimentale per stimare l'oggetto guardato usando un modello di Object Detection (YOLO-World) in tempo reale.
+Invariati: card dedicate nella colonna destra, configurazione in
+`config/experiment_config.yaml`, log CSV in `--output-dir`, YOLO-World
+(`ultralytics`) per gli oggetti e HaGRID per i gesti; TTS via
+`speech_announcer`. Il fallback al centro immagine quando il gaze manca vale
+solo per la selezione dell'oggetto (ROI), non per l'overlay.
 
-### Prerequisiti YOLO-World
+## Log diagnostici
 
-Per usare YOLO-World, installare il pacchetto ultralytics (se non è già presente nel requirements.txt):
+All'avvio dello streaming l'app logga: riepilogo config (interfaccia, profilo,
+batch, certificato, `keep_streaming_on_disconnection`, endpoint), stato Wi-Fi
+del device (SSID/IP), bind del receiver, `get_streaming_info()` e — dal
+monitor — transizioni del canale di controllo e connessioni/disconnessioni del
+device al receiver (`server.connections()`). Con `--debug-streams` il livello
+sale a DEBUG.
+
+## Test
+
 ```bash
-pip install ultralytics torch
+QT_QPA_PLATFORM=offscreen pytest -q          # 43 test
+QT_QPA_PLATFORM=offscreen python tools/smoke_test_gui.py
 ```
-*Se non è disponibile una GPU CUDA, l'inferenza avverrà su CPU, che potrebbe essere più lenta. Assicurarsi di mantenere bassa la frequenza di inferenza se si usa solo la CPU.*
 
-### Come avviare l'esperimento
+- `tests/test_stream_worker_wifi.py`: flusso Wi-Fi completo su SDK finto
+  (WIFI_STA + batch 200 + keep flag + endpoint, USB invariato, aggancio a
+  stream esistente, stop con device irraggiungibile, perdita/recupero
+  controllo, stato publishing dal receiver).
+- `tests/test_sdk_contract.py`: gira solo dove l'SDK reale è installato e
+  verifica che l'API usata esista davvero in quella build (incl. l'assenza del
+  diametro pupillare in EyeGaze).
+- `tests/test_no_fake_data.py`: N/A e waiting states in assenza di dati reali;
+  batteria nascosta a canale di controllo perso.
+- Test GUI offscreen su widget video/qimage e smoke test completo mock.
 
-Dalla dashboard principale, dopo aver connesso gli occhiali e avviato lo streaming:
-1. Cliccare su **Inizia esperimento** (ex tasto di registrazione).
-2. L'app disabiliterà gli stream non essenziali (HR, SLAM, etc) e si concentrerà sullo stream RGB e sul Gaze Tracker.
-3. Il worker in background leggerà la configurazione da `config/experiment_config.yaml` e caricherà il modello `yolov8s-worldv2.pt`.
-4. Nel pannello dedicato appariranno lo stato dell'esperimento (ON/OFF), l'ultimo oggetto guardato con la relativa confidenza, e gli FPS di inferenza.
-5. Cliccare su **Ferma esperimento** per arrestarlo.
+Debug del flusso immagini reale:
 
-### Configurazione
-
-I parametri dell'esperimento possono essere modificati nel file `config/experiment_config.yaml`:
-- **inference_interval**: Frequenza di inferenza (default 2.0 secondi)
-- **crop_size**: Dimensione della ROI centrata sul gaze (default 640px)
-- **max_radius_px**: Raggio di ricerca per associare le bounding box al gaze point (default 200px)
-- **classes**: Lista degli oggetti open-vocabulary da riconoscere (libro, smartphone, ecc.)
-
-### Salvataggio Log
-
-I log dell'esperimento vengono salvati come file CSV nella directory indicata nel campo testo (default `./recordings/`). Il file è nominato `experiment_log_<timestamp>.csv` e contiene:
-- `timestamp`: momento dell'evento
-- `gaze_x`, `gaze_y`: coordinate dello sguardo
-- `detection_label`, `confidence`: oggetto riconosciuto e confidenza
-- `bbox_*`: coordinate del bounding box
-- `inference_time_ms`: durata inferenza
-
-### Gestione Gaze Assente
-
-Se il sensore Eye Tracking fallisce nel restituire il punto di Gaze, il sistema usa automaticamente il **centro dell'immagine** come fallback sia per calcolare il crop (ROI) che per associare l'oggetto. Se nessun oggetto riconosciuto si trova vicino al punto di gaze/centro o ha scarsa confidenza, l'interfaccia mostrerà *unknown*.
+```bash
+python tools/debug_image_stream.py --usb --profile mp_streaming_demo --out /tmp/aria_frame_debug --max-frames 20
+ARIA_DEVICE_IP=<ip> python tools/debug_image_stream.py --wifi --profile mp_streaming_demo --out /tmp/aria_frame_debug --max-frames 20
+```
 
 ## Performance
 
-Scelte implementate:
-
-- buffer thread-safe `LatestValueBuffer`, un solo campione utile per stream;
-- queue SDK impostate a 1 dove il receiver lo consente;
-- resize RGB massimo configurabile, default 960x540;
-- target RGB 10 fps;
-- ET cameras max 5 fps;
-- hand tracking max 5-10 fps;
-- BPM aggiornato a 1 Hz;
-- PPG processato internamente a frequenza piena, plot solo decimato;
-- UI refresh massimo 30 Hz;
-- nessun video locale salvato durante Recording Mode.
-
-## Debug video
-
-Se serve ispezionare cosa arriva davvero dal decoder immagini, avvia la GUI con
-dump limitato dei primi frame:
-
-```bash
-python app.py --usb --debug-streams --debug-image-dump /tmp/aria_gui_debug
-```
-
-Per isolare completamente la GUI dal device:
-
-```bash
-QT_QPA_PLATFORM=offscreen pytest -q
-QT_QPA_PLATFORM=offscreen python tools/smoke_test_gui.py
-```
-
-Per salvare i primi frame reali RGB/SLAM/ET con PNG e JSON:
-
-```bash
-python tools/debug_image_stream.py --usb --profile mp_streaming_demo --out /tmp/aria_frame_debug --max-frames 20
-```
-
-WiFi:
-
-```bash
-ARIA_DEVICE_IP=192.168.159.37 python tools/debug_image_stream.py --wifi --profile mp_streaming_demo --out /tmp/aria_frame_debug --max-frames 20
-```
+- buffer thread-safe `LatestValueBuffer` (un campione utile per stream) con
+  età del dato usata dalla UI per gli stati LIVE/STALE;
+- queue SDK a 1 dove supportato; RGB max 960x540 @10 fps; ET 5 fps; HT 10 fps;
+  BPM 1 Hz; UI refresh 30 Hz;
+- niente `QGraphicsDropShadowEffect` sui pannelli (jank in resize durante lo
+  streaming);
+- default demo: preview SLAM frontale in scala di grigi a bassa latenza;
+  `--decode-rgb` abilita l'RGB H265 a colori (più latenza su Linux).
 
 ## Limitazioni note
 
-- Su Linux il decoder Python/XPRS del vero RGB H265 puo stampare messaggi tipo
-  `PPS id out of range` o `bad optional access` e introdurre ritardo. Per la demo
-  la dashboard non decodifica RGB di default: mostra `Low-latency camera + gaze`
-  dalla camera SLAM frontale in scala di grigi. Usare `--decode-rgb` solo se
-  serve provare il colore e si accetta piu latenza.
-- In questa build SDK il receiver espone callback per PPG e barometro, ma non
-  espone callback tipizzate per ALS e temperatura dedicata. La app usa
-  `device.status().skin_temp_celsius` e `BarometerData.temperature` per la
-  temperatura dispositivo/sensore. ALS resta "not available" in reale se il
-  receiver non espone il dato.
-- La proiezione gaze su RGB usa una fallback stabile yaw/pitch. La funzione
-  `project_gaze_to_rgb()` e pronta per collegare la calibrazione reale.
-- La proiezione mano usa una fallback 2D per lo skeleton. La funzione
-  `project_hand_to_camera()` e pronta per collegare la calibrazione reale.
-- Le pupille live dipendono da cosa espone la callback EyeGaze SDK. Se diametro
-  e centro pupilla non sono disponibili, il pannello resta visibile ma segnala
-  "not available".
+- Decoder Python RGB H265 su Linux: possibili messaggi `PPS id out of range` /
+  `bad optional access` e latenza extra (per questo il default è la SLAM).
+- Pupille e ALS non esposti dalle callback live di questa build SDK → `N/A`.
+- La proiezione del gaze usa la calibrazione reale quando il receiver la
+  fornisce (`register_device_calib_callback`), altrimenti un fallback
+  geometrico yaw/pitch calcolato dai dati reali.
+- `keep_streaming_on_disconnection` mantiene lo stream attivo dopo lo
+  scollegamento: ricordarsi di premere Stop (o `aria_gen2 streaming stop`) a
+  fine demo per non lasciare gli occhiali a trasmettere.
 
 ## Troubleshooting
 
-Se il pannello RGB e un rettangolo giallo pieno:
+Wi-Fi non parte / nessun dato:
 
-1. Esegui il test immagine mock:
+1. `aria_gen2 device status` → `wifi_connected: true` e `wifi_ip_address`
+   valorizzato; altrimenti `aria_gen2 device wifi connect --ssid ... --password ...`
+2. PC e occhiali sulla stessa rete; firewall che permetta la porta 6768 in
+   ingresso.
+3. Se l'endpoint automatico non va (reti multi-interfaccia):
+   `--wifi-endpoint https://<ip-del-pc>:6768`.
+4. Certificati: `aria_gen2 streaming stop && aria_gen2 streaming install-certs`;
+   in caso di stato incerto rieseguire `aria_gen2 streaming stop` e provare il
+   sample ufficiale `device_streaming.py --interface wifi_sta`.
+5. Stream rimasto attivo sul device: `aria_gen2 streaming stop`.
+
+Pannello video giallo/piatto o senza frame:
 
 ```bash
 QT_QPA_PLATFORM=offscreen pytest -q tests/test_mock_rgb_frame.py tests/test_qimage_conversion.py tests/test_video_widget_offscreen.py
-```
-
-2. Esegui lo smoke test GUI:
-
-```bash
 QT_QPA_PLATFORM=offscreen python tools/smoke_test_gui.py
-```
-
-3. Esegui il dump reale del flusso:
-
-```bash
 python tools/debug_image_stream.py --usb --profile mp_streaming_demo --out /tmp/aria_frame_debug --max-frames 20
 ```
 
-4. Ispeziona `/tmp/aria_frame_debug/*.png` e `/tmp/aria_frame_debug/*.json`.
-5. Se RGB e invalido ma SLAM e valido, usa la preview SLAM in scala di grigi
-   per la demo.
-6. Non abilitare hook privati o decoder monkey-patch per la demo pubblica.
-
-Dispositivo non trovato:
-
-```bash
-aria_gen2 device list
-aria_gen2 auth check
-```
-
-Se la GUI non riceve callback:
-
-- verifica che la porta 6768 sia libera;
-- disattiva VPN/firewall restrittivi;
-- usa USB per prove lunghe;
-- prova `aria_doctor`;
-- se c'e una registrazione gia attiva sul device, fermarla puo essere necessario
-  prima dello streaming.
-- se compaiono errori sui certificati streaming, esegui:
-
-```bash
-aria_gen2 streaming stop
-aria_gen2 streaming install-certs
-```
-
-Se `install-certs` fallisce ma lo streaming resta in stato incerto, riesegui
-`aria_gen2 streaming stop` e prova il sample ufficiale:
-
-```bash
-python ~/projectaria_client_sdk_samples_gen2/device_streaming.py --profile-name mp_streaming_demo
-```
-
-Nel test su questa macchina il sample ha rigenerato/installato il certificato
-persistente, dopo di che il worker della dashboard ha ricevuto callback RGB,
-eye gaze, hand pose e PPG.
-
-PySide6 mancante:
-
-```bash
-pip install PySide6
-```
-
-ADB non disponibile:
-
-- la CLI puo ancora vedere il device tramite IP noto;
-- per WiFi usare `ARIA_DEVICE_IP=<ip> python app.py --wifi`;
-- per USB verificare USB networking e ADB nel setup SDK.
-
-## Comandi richiesti
-
-```bash
-python app.py
-python app.py --usb
-python app.py --wifi
-python app.py --mock
-python app.py --rgb-fps 10
-python app.py --ht-fps 10
-python app.py --et-fps 10
-python app.py --hr-update-hz 1
-python app.py --rgb-width 960
-python app.py --rgb-height 540
-python app.py --output-dir ./recordings
-python app.py --debug-streams
-python app.py --debug-image-dump /tmp/aria_gui_debug
-```
+Device non trovato: `aria_gen2 device list`, `aria_gen2 auth check`,
+`aria_doctor`; per USB verificare cavo/USB networking; una registrazione
+attiva sul device va fermata prima dello streaming.

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import numpy as np
 
 from mock import mock_data_generators as gen
@@ -17,11 +20,12 @@ def test_mock_rgb_frame_is_not_solid_yellow() -> None:
     assert metadata["conversion_path"] == "as_rgb"
     assert metadata["yellow_fraction"] < 0.55
 
+    out_path = str(Path(tempfile.gettempdir()) / "aria_mock_rgb_frame.png")
     try:
         import cv2
 
-        cv2.imwrite("/tmp/aria_mock_rgb_frame.png", rgb[:, :, ::-1])
+        cv2.imwrite(out_path, rgb[:, :, ::-1])
     except Exception:
         from PIL import Image
 
-        Image.fromarray(rgb).save("/tmp/aria_mock_rgb_frame.png")
+        Image.fromarray(rgb).save(out_path)

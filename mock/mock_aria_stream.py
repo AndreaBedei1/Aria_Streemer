@@ -83,6 +83,10 @@ class MockAriaStreamWorker:
                 sdk_version="mock",
                 status_message="Mock glasses connected",
                 profile_name=self.config.streaming_profile,
+                battery_percent=76,
+                charging=False,
+                wifi_ssid="MockNet",
+                streaming_interface="MOCK",
             )
         )
         self.state.logs.set("Mock mode active: generated RGB, gaze, PPG, pupils and hands")
@@ -320,6 +324,12 @@ class MockAriaStreamWorker:
                         sdk_version="mock",
                         status_message="Mock streaming",
                         profile_name=self.config.streaming_profile,
+                        battery_percent=76,
+                        charging=False,
+                        wifi_ssid="MockNet",
+                        streaming_interface="MOCK",
+                        publishing=True,
+                        publisher_ip="127.0.0.1",
                     )
                 )
                 next_aux = now + 1.0

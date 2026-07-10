@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import numpy as np
 
 from mock import mock_data_generators as gen
@@ -13,7 +16,7 @@ def test_array_to_qimage_converts_mock_frame() -> None:
     assert not image.isNull()
     assert image.width() == 320
     assert image.height() == 180
-    assert image.save("/tmp/aria_qimage_conversion.png")
+    assert image.save(str(Path(tempfile.gettempdir()) / "aria_qimage_conversion.png"))
 
 
 def test_array_to_qimage_rejects_invalid_frames() -> None:
